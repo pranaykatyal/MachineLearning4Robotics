@@ -8,6 +8,7 @@ from torch.utils.data import TensorDataset, DataLoader
 import torch.optim as optim
 import torch.nn as nn
 from torch.utils.tensorboard import SummaryWriter
+import pickle
 import os
 import sys
 
@@ -22,7 +23,7 @@ def GenerateData(n = 100):
     F1 = np.zeros(n)
     F1[0] = np.random.uniform(-10000, 10000)
     for i  in range(1, n):
-        F1[i] = RandomWalk(F1[i-1],100,-10000,10000)
+        F1[i] = RandomWalk(F1[i-1],500,-10000,10000)
     
     # Rear Azimuth Thrusters
     F2 = np.zeros(n)
@@ -31,8 +32,8 @@ def GenerateData(n = 100):
     F3[0] = np.random.uniform(-5000, 5000)
     
     for i in range(1, n):
-        F2[i] = RandomWalk(F2[i-1], 50, -5000, 5000)
-        F3[i] = RandomWalk(F3[i-1], 50, -5000, 5000)
+        F2[i] = RandomWalk(F2[i-1], 250, -5000, 5000)
+        F3[i] = RandomWalk(F3[i-1], 250, -5000, 5000)
     
     # Azimuth Angles
     Alpha2 = np.zeros(n)
@@ -41,8 +42,8 @@ def GenerateData(n = 100):
     Alpha3[0] = np.random.uniform(-180, 180)
     
     for i in range(1, n):
-        Alpha2[i] = RandomWalk(Alpha2[i-1], 5, -180, 180)
-        Alpha3[i] = RandomWalk(Alpha3[i-1], 5, -180, 180)
+        Alpha2[i] = RandomWalk(Alpha2[i-1], 6, -180, 180)
+        Alpha3[i] = RandomWalk(Alpha3[i-1], 6, -180, 180)
     
     # Converting to tensors
     F1 = torch.tensor(F1, dtype=torch.float32)
@@ -221,8 +222,8 @@ def ComputeL0Loss(encoded_commands, original_tau, output_scaler, device):
     reconstructed_tau = ComputeTau(F1, F2, F3, B)  # Shape: [n, 3]
     
     # Step 4: Return MSE loss
-    criterion = nn.MSELoss()
-    loss_value = criterion(reconstructed_tau, original_tau)
+    loss = nn.MSELoss()
+    loss_value = loss(reconstructed_tau, original_tau)
     # print(f"encoded_commands shape: {encoded_commands.shape}")
     # print(f"Alpha2 range: [{Alpha2.min():.2f}, {Alpha2.max():.2f}]")
     # print(f"reconstructed_tau shape: {reconstructed_tau.shape}")
@@ -233,6 +234,191 @@ def ComputeL0Loss(encoded_commands, original_tau, output_scaler, device):
     return loss_value
 
 
+def ComputeL1Loss(decoded_tau, original_tau):
+    loss = nn.MSELoss()
+    loss_value = loss(decoded_tau, original_tau)
+    return loss_value
+
+
+def ComputeL2Loss(encoded_commands, output_scaler, device):
+    # Step 1: Extract components from encoded_commands
+    F1_scaled = encoded_commands[:, 0]
+    F2_scaled = encoded_commands[:, 1]
+    Alpha2_scaled = encoded_commands[:, 2]
+    F3_scaled = encoded_commands[:, 3]
+    Alpha3_scaled = encoded_commands[:, 4]
+    n = F1_scaled.shape[0]
+    # Rescale Alpha2 and Alpha3 from scaled values back to original range
+    alpha2_mean = torch.tensor(output_scaler.mean_[2], device=device)
+    alpha2_std = torch.tensor(output_scaler.scale_[2], device=device)
+    alpha3_mean = torch.tensor(output_scaler.mean_[4], device=device)  
+    alpha3_std = torch.tensor(output_scaler.scale_[4], device=device)
+    # Rescale angles back to original range
+    Alpha2 = Alpha2_scaled * alpha2_std + alpha2_mean
+    Alpha3 = Alpha3_scaled * alpha3_std + alpha3_mean
+    Alpha2 = torch.clamp(Alpha2, -180, 180)
+    Alpha3 = torch.clamp(Alpha3, -180, 180)
+    
+    # Rescale F1,F2,F3 from scaled values back to original range
+    f1_mean = torch.tensor(output_scaler.mean_[0], device=device)
+    f1_std = torch.tensor(output_scaler.scale_[0], device=device)
+    f2_mean = torch.tensor(output_scaler.mean_[1], device=device)
+    f2_std = torch.tensor(output_scaler.scale_[1], device=device)
+    f3_mean = torch.tensor(output_scaler.mean_[3], device=device)
+    f3_std = torch.tensor(output_scaler.scale_[3], device=device)
+    # Rescale forces back to original range
+    F1 = F1_scaled * f1_std + f1_mean
+    F2 = F2_scaled * f2_std + f2_mean
+    F3 = F3_scaled * f3_std + f3_mean
+    
+    unscaled_commands = torch.stack([F1, F2, Alpha2, F3, Alpha3], dim=1)  # Shape: [n, 5]
+    # Define Max limits
+    u_max_tensor = torch.tensor([30000, 60000, 180, 60000, 180], device=device) 
+    # L2 = Σ max(|û_l| - u_l,max, 0)
+    violations = torch.clamp(torch.abs(unscaled_commands) - u_max_tensor, min=0.0)
+    L2_loss = torch.sum(violations)  # Sum over all commands and all samples
+    return L2_loss
+
+
+def ComputeL3Loss(encoded_commands, output_scaler, device):
+    # Step 1: Extract components from encoded_commands
+    F1_scaled = encoded_commands[:, 0]
+    F2_scaled = encoded_commands[:, 1]
+    Alpha2_scaled = encoded_commands[:, 2]
+    F3_scaled = encoded_commands[:, 3]
+    Alpha3_scaled = encoded_commands[:, 4]
+    n = F1_scaled.shape[0]
+    # Rescale Alpha2 and Alpha3 from scaled values back to original range
+    alpha2_mean = torch.tensor(output_scaler.mean_[2], device=device)
+    alpha2_std = torch.tensor(output_scaler.scale_[2], device=device)
+    alpha3_mean = torch.tensor(output_scaler.mean_[4], device=device)  
+    alpha3_std = torch.tensor(output_scaler.scale_[4], device=device)
+    # Rescale angles back to original range
+    Alpha2 = Alpha2_scaled * alpha2_std + alpha2_mean
+    Alpha3 = Alpha3_scaled * alpha3_std + alpha3_mean
+    Alpha2 = torch.clamp(Alpha2, -180, 180)
+    Alpha3 = torch.clamp(Alpha3, -180, 180)
+    
+    # Rescale F1,F2,F3 from scaled values back to original range
+    f1_mean = torch.tensor(output_scaler.mean_[0], device=device)
+    f1_std = torch.tensor(output_scaler.scale_[0], device=device)
+    f2_mean = torch.tensor(output_scaler.mean_[1], device=device)
+    f2_std = torch.tensor(output_scaler.scale_[1], device=device)
+    f3_mean = torch.tensor(output_scaler.mean_[3], device=device)
+    f3_std = torch.tensor(output_scaler.scale_[3], device=device)
+    # Rescale forces back to original range
+    F1 = F1_scaled * f1_std + f1_mean
+    F2 = F2_scaled * f2_std + f2_mean
+    F3 = F3_scaled * f3_std + f3_mean
+    
+    unscaled_commands = torch.stack([F1, F2, Alpha2, F3, Alpha3], dim=1)  # Shape: [n, 5]
+    
+    # unscaled_commands[1:]   # [sample1, sample2, sample3, ...]  (shifted forward)
+    # unscaled_commands[:-1]  # [sample0, sample1, sample2, ...]  (original, minus last) 
+    # Define the Rate limits
+    delta_u_max = torch.tensor([1000, 1000, 10, 1000, 10], device=device)
+    # L3 = Σ max(|rate_change| - delta_u_max, 0)
+    rate_changes = torch.abs(unscaled_commands[:-1] - unscaled_commands[1:])
+    violations = torch.clamp(rate_changes - delta_u_max, min=0.0)
+    L3_loss = torch.sum(violations)  # Sum over all commands and all samples
+    return L3_loss
+    
+def ComputeL4Loss(encoded_commands):
+    # L4 only applies to force commands: F1, F2, F3 (indices 0, 1, 3)
+    # L4 = |û_0|^(3/2) + |û_1|^(3/2) + |û_3|^(3/2)
+    
+    F1_scaled = encoded_commands[:, 0]  # F1
+    F2_scaled = encoded_commands[:, 1]  # F2  
+    F3_scaled = encoded_commands[:, 3]  # F3 
+    
+    # Power consumption: |force|^(3/2) for each thruster
+    L4_loss = torch.sum(torch.abs(F1_scaled)**1.5 + 
+                       torch.abs(F2_scaled)**1.5 + 
+                       torch.abs(F3_scaled)**1.5)
+    return L4_loss
+
+
+def ComputeL5Loss(encoded_commands, output_scaler, device):
+    Alpha2_scaled = encoded_commands[:, 2]
+    Alpha3_scaled = encoded_commands[:, 4]
+    
+    # Rescale Alpha2 and Alpha3 from scaled values back to original range
+    alpha2_mean = torch.tensor(output_scaler.mean_[2], device=device)
+    alpha2_std = torch.tensor(output_scaler.scale_[2], device=device)
+    alpha3_mean = torch.tensor(output_scaler.mean_[4], device=device)  
+    alpha3_std = torch.tensor(output_scaler.scale_[4], device=device)
+    # Rescale angles back to original range
+    Alpha2 = Alpha2_scaled * alpha2_std + alpha2_mean
+    Alpha3 = Alpha3_scaled * alpha3_std + alpha3_mean
+    Alpha2 = torch.clamp(Alpha2, -180, 180)
+    Alpha3 = torch.clamp(Alpha3, -180, 180)
+    
+    # Check violations for both Alpha2 and Alpha3
+    angles = torch.stack([Alpha2, Alpha3], dim=1)  # [batch_size, 2]
+    # Sectors of Violations : [-100, -80] and [80, 100]
+    sector1_violations = ((angles > -100) & (angles < -80)).float()
+    sector2_violations = ((angles > 80) & (angles < 100)).float()
+    L5_loss = torch.sum(sector1_violations) + torch.sum(sector2_violations)
+    return L5_loss
+    
+def evaluate_model(model, data_loader, output_scaler, device, mode="Validation"):
+    model.eval()
+    total_loss = 0
+    total_l0, total_l1, total_l2, total_l3, total_l4, total_l5 = 0, 0, 0, 0, 0, 0
+    num_batches = 0
+    
+    with torch.no_grad():
+        for batch_x, batch_y in data_loader:
+            batch_x, batch_y = batch_x.to(device), batch_y.to(device)
+            
+            # Forward pass
+            encoded, decoded = model(batch_x)
+            
+            # Compute all losses
+            L0 = ComputeL0Loss(encoded, batch_x, output_scaler, device)
+            L1 = ComputeL1Loss(decoded, batch_x)
+            L2 = ComputeL2Loss(encoded, output_scaler, device)
+            L3 = ComputeL3Loss(encoded, output_scaler, device)
+            L4 = ComputeL4Loss(encoded)
+            L5 = ComputeL5Loss(encoded, output_scaler, device)
+            
+            # Combined loss
+            Loss = k0*L0 + k1*L1 + k2*L2 + k3*L3 + k4*L4 + k5*L5
+            
+            # Accumulate losses
+            total_loss += Loss.item()
+            total_l0 += L0.item()
+            total_l1 += L1.item()
+            total_l2 += L2.item()
+            total_l3 += L3.item()
+            total_l4 += L4.item()
+            total_l5 += L5.item()
+            num_batches += 1
+    
+    # Calculate averages
+    avg_loss = total_loss / num_batches
+    avg_l0 = total_l0 / num_batches
+    avg_l1 = total_l1 / num_batches
+    avg_l2 = total_l2 / num_batches
+    avg_l3 = total_l3 / num_batches
+    avg_l4 = total_l4 / num_batches
+    avg_l5 = total_l5 / num_batches
+    
+    print(f"{mode} Results:")
+    print(f"  Total Loss: {avg_loss:.6f}")
+    print(f"  L0 (Physics): {avg_l0:.6f}")
+    print(f"  L1 (Autoencoder): {avg_l1:.6f}")
+    print(f"  L2 (Magnitude): {avg_l2:.6f}")
+    print(f"  L3 (Rate): {avg_l3:.6f}")
+    print(f"  L4 (Power): {avg_l4:.6f}")
+    print(f"  L5 (Sector): {avg_l5:.6f}")
+    
+    return {
+        'total_loss': avg_loss,
+        'L0': avg_l0, 'L1': avg_l1, 'L2': avg_l2,
+        'L3': avg_l3, 'L4': avg_l4, 'L5': avg_l5
+    }
+        
 if __name__ == "__main__":
     # 1. Generate large dataset 
     torch.manual_seed(42)
@@ -258,6 +444,14 @@ if __name__ == "__main__":
     
     inputs_tensor = torch.tensor(inputs_scaled, dtype=torch.float32)
     outputs_tensor = torch.tensor(outputs_scaled, dtype=torch.float32)
+    
+    scaler_data = {
+    'input_scaler': input_scaler,
+    'output_scaler': output_scaler
+    }
+    with open('scalers.pkl', 'wb') as f:
+        pickle.dump(scaler_data, f)
+    print("Scalers saved to scalers.pkl")
     # print(f"Original input range: [{inputs.min():.2f}, {inputs.max():.2f}]")
     # print(f"Scaled input range: [{inputs_scaled.min():.2f}, {inputs_scaled.max():.2f}]")
     # print(f"Scaled input mean: {inputs_scaled.mean(axis=0)}")
@@ -265,12 +459,39 @@ if __name__ == "__main__":
     
     # 3. Split the Data for Training and Testing
     # Split the data (80% train, 20% test)
-    X_train, X_test, y_train, y_test = train_test_split(
-        inputs_tensor, 
-        outputs_tensor, 
-        test_size=0.2, 
-        random_state=42
-    )
+    # X_train, X_test, y_train, y_test = train_test_split(
+    #     inputs_tensor, 
+    #     outputs_tensor, 
+    #     test_size=0.2, 
+    #     random_state=42
+    # )
+    
+    
+    # 70-10-20 split for train-val-test
+    total_samples = len(inputs_tensor)
+    train_end = int(0.7 * total_samples)
+    val_end = int(0.8 * total_samples)
+
+    X_train = inputs_tensor[:train_end]
+    X_val = inputs_tensor[train_end:val_end] 
+    X_test = inputs_tensor[val_end:]
+
+    y_train = outputs_tensor[:train_end]
+    y_val = outputs_tensor[train_end:val_end]
+    y_test = outputs_tensor[val_end:]
+
+    # print(f"Training set: {X_train.shape[0]:,} samples ({X_train.shape[0]/total_samples*100:.1f}%)")
+    # print(f"Validation set: {X_val.shape[0]:,} samples ({X_val.shape[0]/total_samples*100:.1f}%)")
+    # print(f"Test set: {X_test.shape[0]:,} samples ({X_test.shape[0]/total_samples*100:.1f}%)")
+
+    # Create datasets and dataloaders
+    train_dataset = TensorDataset(X_train, y_train)
+    val_dataset = TensorDataset(X_val, y_val)
+    test_dataset = TensorDataset(X_test, y_test)
+
+    train_loader = DataLoader(train_dataset, batch_size=1024, shuffle=False)
+    val_loader = DataLoader(val_dataset, batch_size=1024, shuffle=False)
+    test_loader = DataLoader(test_dataset, batch_size=1024, shuffle=False)
 
     # print(f"Training set: {X_train.shape[0]:,} samples")
     # print(f"Test set: {X_test.shape[0]:,} samples")
@@ -290,14 +511,14 @@ if __name__ == "__main__":
     
     # Create dataset and dataloader
     train_dataset = TensorDataset(X_train, y_train)
-    train_loader = DataLoader(train_dataset, batch_size=1024, shuffle=True)
+    train_loader = DataLoader(train_dataset, batch_size=1024, shuffle=False) # Set to false for sequential data
     # Set the device to GPU
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
     
     # Initialize model, optimizer, and loss
     model = Autoencoder(hidden_size=64).to(device)
-    optimizer = optim.Adam(model.parameters(), lr=0.001)
+    optimizer = optim.Adam(model.parameters(), lr=0.0005)
     criterion = nn.MSELoss()
     
     # Create tensorboard writer
@@ -307,8 +528,18 @@ if __name__ == "__main__":
     
     # Basic training loop
 
-    num_epochs = 10
+    num_epochs = 50
     step = 1
+    best_val_loss = float('inf')
+    best_epoch = 0
+    
+    # Loss Hyperparameters
+    k0 = 2
+    k1 = 1
+    k2 = 0.1
+    k3 = 1e-7
+    k4 = 1e-7
+    k5 = 0.1
     for epoch in range(num_epochs):
         model.train()
         total_loss = 0
@@ -324,25 +555,98 @@ if __name__ == "__main__":
             # loss = criterion(encoded, batch_y)
             # Compute L0 loss
             L0 = ComputeL0Loss(encoded, batch_x, output_scaler, device)
+            # Compute L1 Loss
+            L1 = ComputeL1Loss(decoded, batch_x)
+            # Compute L2 Loss
+            L2 = ComputeL2Loss(encoded, output_scaler, device)
+            # Compute L3 Loss
+            L3 = ComputeL3Loss(encoded, output_scaler, device)
+            # Compute L4 Loss
+            L4 = ComputeL4Loss(encoded)
+            # Compute L5 Loss
+            L5 = ComputeL5Loss(encoded, output_scaler, device)
             
+            
+            # Combined Loss
+            Loss = k0*L0 + k1*L1 + k2*L2 + k3*L3 + k4*L4 + k5*L5
             # Backward pass
-            L0.backward()
+            Loss.backward()
             optimizer.step()
             
             # Log to tensorboard
-            writer.add_scalar('Loss/Train_Batch', L0.item(), step)
+            writer.add_scalar('Loss/L0_Command_Reconstruction', L0.item(), step)
+            writer.add_scalar('Loss/L1_Autoencoder', L1.item(), step)
+            writer.add_scalar('Loss/L2_Limit_Violation', L2.item(), step)
+            writer.add_scalar('Loss/L3_Rate_Limit_Violation', L3.item(), step)
+            writer.add_scalar('Loss/L4_Power_consumption', L4.item(), step)
+            writer.add_scalar('Loss/L5_Sector_Violations', L5.item(), step)
+            writer.add_scalar('Loss/Total_Loss', Loss.item(), step)
             
-            total_loss += L0.item()
+            total_loss += Loss.item()
             step += 1
             
             if batch_idx % 100 == 0:
-                print(f'Epoch {epoch}, Batch {batch_idx}, Loss: {L0.item():.4f}')
+                print(f'Epoch {epoch}, Batch {batch_idx}:')
+                print(f'  L0: {L0.item():.6f}, L1: {L1.item():.6f}')
+                print(f'  L2: {L2.item():.6f}, L3: {L3.item():.6f}')
+                print(f'  L4: {L4.item():.6f}, L5: {L5.item():.6f}')
+                print(f'  Total: {Loss.item():.6f}')
         
         # Log epoch-level metrics
         avg_loss = total_loss / len(train_loader)
         writer.add_scalar('Loss/Train_Epoch', avg_loss, epoch)
         print(f'Epoch {epoch} completed, Average Loss: {avg_loss:.4f}')
+        
+         # Validation Phase
+        val_results = evaluate_model(model, val_loader, output_scaler, device, "Validation")
+        
+        # Log epoch-level metrics to tensorboard
+        avg_train_loss = total_loss / len(train_loader)
+        
+        writer.add_scalar('Epoch/Train_Loss', avg_train_loss, epoch)
+        writer.add_scalar('Epoch/Val_Loss', val_results['total_loss'], epoch)
+        writer.add_scalar('Epoch/Val_L0', val_results['L0'], epoch)
+        writer.add_scalar('Epoch/Val_L1', val_results['L1'], epoch)
+        writer.add_scalar('Epoch/Val_L2', val_results['L2'], epoch)
+        writer.add_scalar('Epoch/Val_L3', val_results['L3'], epoch)
+        writer.add_scalar('Epoch/Val_L4', val_results['L4'], epoch)
+        writer.add_scalar('Epoch/Val_L5', val_results['L5'], epoch)
+        
+        print(f'Epoch {epoch} completed:')
+        print(f'  Training Loss: {avg_train_loss:.6f}')
+        print(f'  Validation Loss: {val_results["total_loss"]:.6f}')
+        
+        # Save best model
+        if val_results['total_loss'] < best_val_loss:
+            best_val_loss = val_results['total_loss']
+            best_epoch = epoch
+            torch.save(model.state_dict(), 'best_model.pth')
+            print(f"  New best model saved! (Loss: {best_val_loss:.6f})")
+        
+        print("-" * 60)
 
     # Close writer
     writer.close()
-    
+    # Final Test Evaluation
+    print(f"\nLoading best model from epoch {best_epoch}")
+    model.load_state_dict(torch.load('best_model.pth'))
+
+    print("\n" + "="*60)
+    print("FINAL TEST EVALUATION")
+    print("="*60)
+    test_results = evaluate_model(model, test_loader, output_scaler, device, "Test")
+
+    # Log final test results to tensorboard
+    writer = SummaryWriter(log_dir)  # Reopen writer for final logging
+    writer.add_scalar('Final/Test_Loss', test_results['total_loss'], 0)
+    writer.add_scalar('Final/Test_L0', test_results['L0'], 0)
+    writer.add_scalar('Final/Test_L1', test_results['L1'], 0)
+    writer.add_scalar('Final/Test_L2', test_results['L2'], 0)
+    writer.add_scalar('Final/Test_L3', test_results['L3'], 0)
+    writer.add_scalar('Final/Test_L4', test_results['L4'], 0)
+    writer.add_scalar('Final/Test_L5', test_results['L5'], 0)
+    writer.close()
+
+    print(f"\nTraining completed!")
+    print(f"Best validation loss: {best_val_loss:.6f} at epoch {best_epoch}")
+    print(f"Final test loss: {test_results['total_loss']:.6f}")
