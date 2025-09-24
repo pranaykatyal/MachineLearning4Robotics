@@ -124,11 +124,12 @@ def GenerateLargeDataset(num_sequences=1000, sequence_length=1000):
     return F1_final, F2_final, F3_final, Alpha2_final, Alpha3_final, Tau_final
     
 class Encoder(nn.Module):
-    def __init__(self, input_size=3, hidden_size=64, output_size=5):
+    def __init__(self, input_size=3, hidden_size=64, output_size=5 ,dropout_rate=0.2):
         super(Encoder, self).__init__()
         # LSTM1, LSTM2, Dense Linear
         self.lstm1 = nn.LSTM(input_size, hidden_size, batch_first=True)
         self.lstm2 = nn.LSTM(hidden_size, hidden_size, batch_first=True)
+        self.dropout = nn.Dropout(dropout_rate)
         self.linear = nn.Linear(hidden_size, output_size)
         
     def forward(self, x):
@@ -139,7 +140,9 @@ class Encoder(nn.Module):
             
         # Pass through LSTM layers
         out1, _ = self.lstm1(x)
+        out1 = self.dropout(out1)
         out2, _ = self.lstm2(out1)
+        out2 = self.dropout(out2)
         
         # Take the last output and pass through linear layer
         output = self.linear(out2[:, -1, :])  # [batch, output_size]
@@ -147,11 +150,12 @@ class Encoder(nn.Module):
         return output    
     
 class Decoder(nn.Module):
-    def __init__(self, input_size=5, hidden_size=64, output_size=3):
+    def __init__(self, input_size=5, hidden_size=64, output_size=3 ,dropout_rate=0.2):
         super(Decoder, self).__init__()
         # LSTM1, LSTM2, Dense Linear
         self.lstm1 = nn.LSTM(input_size, hidden_size, batch_first=True)
         self.lstm2 = nn.LSTM(hidden_size, hidden_size, batch_first=True)
+        self.dropout = nn.Dropout(dropout_rate)
         self.linear = nn.Linear(hidden_size, output_size)
         
     def forward(self, x):
@@ -162,7 +166,9 @@ class Decoder(nn.Module):
             
         # Pass through LSTM layers
         out1, _ = self.lstm1(x)
+        out1 = self.dropout(out1)
         out2, _ = self.lstm2(out1)
+        out2 = self.dropout(out2)
         
         # Take the last output and pass through linear layer
         output = self.linear(out2[:, -1, :])  # [batch, output_size]
@@ -170,10 +176,10 @@ class Decoder(nn.Module):
         return output 
 
 class Autoencoder(nn.Module):
-    def __init__(self, hidden_size=64):
+    def __init__(self, hidden_size=64 ,dropout_rate=0.2):
         super(Autoencoder, self).__init__()
-        self.encoder = Encoder(input_size=3, hidden_size=hidden_size, output_size=5)
-        self.decoder = Decoder(input_size=5, hidden_size=hidden_size, output_size=3)
+        self.encoder = Encoder(input_size=3, hidden_size=hidden_size, output_size=5, dropout_rate=dropout_rate)
+        self.decoder = Decoder(input_size=5, hidden_size=hidden_size, output_size=3, dropout_rate=dropout_rate)
         
     def forward(self, x):
         # Encoder: tau (3D) -> thruster commands (5D)
@@ -424,7 +430,7 @@ if __name__ == "__main__":
     torch.manual_seed(42)
     np.random.seed(42)
     
-    F1, F2, F3, Alpha2, Alpha3, Tau = GenerateLargeDataset(num_sequences=1000, sequence_length=1000)
+    F1, F2, F3, Alpha2, Alpha3, Tau = GenerateLargeDataset(num_sequences=2000, sequence_length=500)
     thruster_commands = torch.stack([F1, F2, Alpha2, F3, Alpha3], dim=1)  # Shape: [1000000, 5]
     # print(f"Thruster commands shape: {thruster_commands.shape}")
     # print(f"Final shapes:")
@@ -489,9 +495,9 @@ if __name__ == "__main__":
     val_dataset = TensorDataset(X_val, y_val)
     test_dataset = TensorDataset(X_test, y_test)
 
-    train_loader = DataLoader(train_dataset, batch_size=1024, shuffle=False)
-    val_loader = DataLoader(val_dataset, batch_size=1024, shuffle=False)
-    test_loader = DataLoader(test_dataset, batch_size=1024, shuffle=False)
+    train_loader = DataLoader(train_dataset, batch_size=50, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=50, shuffle=False)
+    test_loader = DataLoader(test_dataset, batch_size=50, shuffle=False)
 
     # print(f"Training set: {X_train.shape[0]:,} samples")
     # print(f"Test set: {X_test.shape[0]:,} samples")
@@ -510,14 +516,14 @@ if __name__ == "__main__":
     
     
     # Create dataset and dataloader
-    train_dataset = TensorDataset(X_train, y_train)
-    train_loader = DataLoader(train_dataset, batch_size=1024, shuffle=False) # Set to false for sequential data
+    # train_dataset = TensorDataset(X_train, y_train)
+    # train_loader = DataLoader(train_dataset, batch_size=1024, shuffle=False) # Set to false for sequential data
     # Set the device to GPU
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
     
     # Initialize model, optimizer, and loss
-    model = Autoencoder(hidden_size=64).to(device)
+    model = Autoencoder(hidden_size=64, dropout_rate=0.2).to(device)
     optimizer = optim.Adam(model.parameters(), lr=0.0005)
     criterion = nn.MSELoss()
     
@@ -528,17 +534,17 @@ if __name__ == "__main__":
     
     # Basic training loop
 
-    num_epochs = 50
+    num_epochs = 8 # Reduced epoch to avoid the unstable region, this regularization is called Early Stopping
     step = 1
     best_val_loss = float('inf')
     best_epoch = 0
     
     # Loss Hyperparameters
-    k0 = 2
+    k0 = 10
     k1 = 1
     k2 = 0.1
     k3 = 1e-7
-    k4 = 1e-7
+    k4 = 1e-8
     k5 = 0.1
     for epoch in range(num_epochs):
         model.train()
@@ -650,3 +656,13 @@ if __name__ == "__main__":
     print(f"\nTraining completed!")
     print(f"Best validation loss: {best_val_loss:.6f} at epoch {best_epoch}")
     print(f"Final test loss: {test_results['total_loss']:.6f}")
+    
+    with torch.no_grad():
+        test_inputs = torch.tensor([[10, 0, 0], [0, 10, 0], [0, 0, 5]], dtype=torch.float32)
+        test_scaled = input_scaler.transform(test_inputs.numpy())
+        test_tensor = torch.tensor(test_scaled).to(device)
+        _, reconstructed_tau = model(test_tensor)
+        unscaledReconstructedTau = input_scaler.inverse_transform(reconstructed_tau.cpu().numpy())
+        
+        for i, pred in enumerate(unscaledReconstructedTau):
+            print(f"Input {test_inputs[i]}: Reconstructed=[{pred[0]:.1f}, {pred[1]:.1f}, {pred[2]:.1f}]")
