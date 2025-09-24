@@ -6,7 +6,7 @@ Usage:
 
 Make sure you have:
 - best_model.pth (saved model weights)
-- scaling_info.pkl (saved scaling parameters)
+- scalers.pkl (saved StandardScaler objects)
 - The original training script in the same directory for imports
 """
 
@@ -15,16 +15,16 @@ import numpy as np
 import pickle
 
 # Import your model classes and functions from the main script
-# Make sure your main script is named HW1.py or change the import
 from HW1 import Autoencoder, GenerateBmatrix, ComputeTau
 
 class ModelTester:
-    def __init__(self, model_path='best_model.pth'):
+    def __init__(self, model_path='best_model.pth', scaler_path='scalers.pkl'):
         """
         Initialize the model tester
         
         Args:
             model_path: Path to saved model weights
+            scaler_path: Path to saved StandardScaler objects
         """
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         print(f"Using device: {self.device}")
@@ -35,59 +35,15 @@ class ModelTester:
         self.model.eval()
         print(f"Model loaded from {model_path}")
         
-        # Load scaling info
+        # Load scalers
         try:
-            with open('scaling_info.pkl', 'rb') as f:
-                self.scaling_info = pickle.load(f)
+            with open(scaler_path, 'rb') as f:
+                scaler_data = pickle.load(f)
+                self.input_scaler = scaler_data['input_scaler']
+                self.output_scaler = scaler_data['output_scaler']
             print("Scaling info loaded")
         except FileNotFoundError:
-            print("Warning: scaling_info.pkl not found, using default values")
-            self.scaling_info = {
-                'force_scale': 10000.0,
-                'angle_scale': 180.0, 
-                'moment_scale': 10000.0
-            }
-        
-    def scale_input(self, tau_forces):
-        """Scale input tau forces"""
-        tau_array = np.array([tau_forces])  # Shape: [1, 3]
-        
-        # Manual scaling using the same approach as training
-        force_scale = self.scaling_info['force_scale']
-        moment_scale = self.scaling_info['moment_scale']
-        
-        tau_scaled = tau_array.copy()
-        tau_scaled[:, 0] = tau_array[:, 0] / force_scale   # Surge force
-        tau_scaled[:, 1] = tau_array[:, 1] / force_scale   # Sway force  
-        tau_scaled[:, 2] = tau_array[:, 2] / moment_scale  # Yaw moment
-        
-        return tau_scaled
-    
-    def unscale_output(self, commands_scaled):
-        """Unscale output commands"""
-        force_scale = self.scaling_info['force_scale']
-        angle_scale = self.scaling_info['angle_scale']
-        
-        commands_unscaled = commands_scaled.copy()
-        commands_unscaled[:, 0] = commands_scaled[:, 0] * force_scale  # F1
-        commands_unscaled[:, 1] = commands_scaled[:, 1] * force_scale  # F2
-        commands_unscaled[:, 2] = commands_scaled[:, 2] * angle_scale  # Alpha2
-        commands_unscaled[:, 3] = commands_scaled[:, 3] * force_scale  # F3
-        commands_unscaled[:, 4] = commands_scaled[:, 4] * angle_scale  # Alpha3
-        
-        return commands_unscaled
-    
-    def unscale_input(self, tau_scaled):
-        """Unscale input tau forces"""
-        force_scale = self.scaling_info['force_scale']
-        moment_scale = self.scaling_info['moment_scale']
-        
-        tau_unscaled = tau_scaled.copy()
-        tau_unscaled[:, 0] = tau_scaled[:, 0] * force_scale   # Surge force
-        tau_unscaled[:, 1] = tau_scaled[:, 1] * force_scale   # Sway force
-        tau_unscaled[:, 2] = tau_scaled[:, 2] * moment_scale  # Yaw moment
-        
-        return tau_unscaled
+            raise FileNotFoundError(f"Scaler file {scaler_path} not found. Make sure to run training first.")
         
     def test_single_sample(self, tau_forces, sample_name="Sample"):
         """
@@ -101,17 +57,18 @@ class ModelTester:
         print(f"TESTING {sample_name}")
         print(f"{'='*60}")
         
-        # Prepare input using new scaling
-        tau_scaled = self.scale_input(tau_forces)
+        # Prepare input using StandardScaler
+        tau_array = np.array([tau_forces])  # Shape: [1, 3]
+        tau_scaled = self.input_scaler.transform(tau_array)
         tau_tensor = torch.tensor(tau_scaled, dtype=torch.float32).to(self.device)
         
         with torch.no_grad():
             # Forward pass
             encoded, decoded = self.model(tau_tensor)
             
-            # Unscale predicted commands
+            # Unscale predicted commands using StandardScaler
             commands_scaled = encoded.cpu().numpy()
-            commands_unscaled = self.unscale_output(commands_scaled)
+            commands_unscaled = self.output_scaler.inverse_transform(commands_scaled)
             
             F1, F2, Alpha2, F3, Alpha3 = commands_unscaled[0]
             
@@ -128,7 +85,7 @@ class ModelTester:
             
             # Autoencoder reconstruction
             decoded_scaled = decoded.cpu().numpy()
-            decoded_unscaled = self.unscale_input(decoded_scaled)[0]
+            decoded_unscaled = self.input_scaler.inverse_transform(decoded_scaled)[0]
         
         # Display results
         print(f"\n--- INPUT (Desired Forces) ---")
@@ -149,8 +106,8 @@ class ModelTester:
         print(f"Autoenc:    [{decoded_unscaled[0]:8.2f}, {decoded_unscaled[1]:8.2f}, {decoded_unscaled[2]:8.2f}]")
         
         # Calculate errors
-        physics_error = np.abs(reconstructed_tau_np - tau_forces).mean()
-        autoencoder_error = np.abs(decoded_unscaled - tau_forces).mean()
+        physics_error = np.sum((reconstructed_tau_np - tau_forces)**2)
+        autoencoder_error = np.sum((decoded_unscaled - tau_forces)**2)
         
         print(f"\n--- ERRORS ---")
         print(f"Physics Error (L0):     {physics_error:.6f}")
@@ -188,14 +145,14 @@ def main():
     
     # Test cases: [surge, sway, yaw_moment]
     test_cases = [
-        ([1000, 0, 0], "Pure Surge"),
-        ([0, 1000, 0], "Pure Sway"), 
-        ([0, 0, 500], "Pure Yaw"),
-        ([1000, 500, 200], "Combined Motion"),
-        ([2000, -1000, -300], "Complex Maneuver"),
-        ([-1500, 800, 100], "Reverse Motion"),
+        ([10, 0, 0], "Pure Surge"),
+        ([0, 10, 0], "Pure Sway"), 
+        ([0, 0, 5], "Pure Yaw"),
+        ([1, 5, 2], "Combined Motion"),
+        ([20, -10, -3], "Complex Maneuver"),
+        ([-15, 8, 1], "Reverse Motion"),
         ([0, 0, 0], "Hold Position"),
-        ([5000, 2000, 1000], "High Force Request"),
+        ([5, 2, 1], "High Force Request"),
     ]
     
     print("CONTROL ALLOCATION NEURAL NETWORK TESTING")
@@ -219,23 +176,6 @@ def main():
     print(f"Max Autoencoder Error:     {np.max(autoencoder_errors):.6f}")
     print(f"Min Physics Error:         {np.min(physics_errors):.6f}")
     print(f"Min Autoencoder Error:     {np.min(autoencoder_errors):.6f}")
-    
-    # Test custom input
-    print(f"\n{'='*80}")
-    print("CUSTOM INPUT TEST")
-    print(f"{'='*80}")
-    print("Enter custom forces (or press Enter to skip):")
-    
-    try:
-        surge = input("Surge force (N): ")
-        if surge:
-            sway = input("Sway force (N): ")
-            yaw = input("Yaw moment (Nm): ")
-            
-            custom_forces = [float(surge), float(sway), float(yaw)]
-            tester.test_single_sample(custom_forces, "Custom Input")
-    except (ValueError, KeyboardInterrupt):
-        print("Skipping custom input")
     
     print(f"\nTesting completed!")
 
