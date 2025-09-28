@@ -2,508 +2,413 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import numpy as np
-from sklearn.preprocessing import StandardScaler
+import matplotlib.pyplot as plt
+from torch.utils.data import Dataset, DataLoader
+import time
 
-def RandomWalk(Var, Step, minVal, maxVal):
-    Var += np.random.uniform(-Step, Step)
-    Var = np.clip(Var, minVal, maxVal)
-    return Var
+class ShipControlDataset(Dataset):
+    def __init__(self, X, y):
+        self.X = torch.FloatTensor(X)
+        self.y = torch.FloatTensor(y)
+    
+    def __len__(self):
+        return len(self.X)
+    
+    def __getitem__(self, idx):
+        return self.X[idx], self.y[idx]
 
-def GenerateData(n=10):
-    """Generate very short sequences for debugging"""
-    F1 = np.zeros(n)
-    F1[0] = np.random.uniform(-1000, 1000)  # Smaller range for debugging
-    for i in range(1, n):
-        F1[i] = RandomWalk(F1[i-1], 50, -1000, 1000)
-    
-    F2 = np.zeros(n)
-    F3 = np.zeros(n)
-    F2[0] = np.random.uniform(-500, 500)
-    F3[0] = np.random.uniform(-500, 500)
-    
-    for i in range(1, n):
-        F2[i] = RandomWalk(F2[i-1], 25, -500, 500)
-        F3[i] = RandomWalk(F3[i-1], 25, -500, 500)
-    
-    Alpha2 = np.zeros(n)
-    Alpha3 = np.zeros(n)
-    Alpha2[0] = np.random.uniform(-90, 90)  # Smaller angle range
-    Alpha3[0] = np.random.uniform(-90, 90)
-    
-    for i in range(1, n):
-        Alpha2[i] = RandomWalk(Alpha2[i-1], 3, -90, 90)
-        Alpha3[i] = RandomWalk(Alpha3[i-1], 3, -90, 90)
-    
-    return torch.tensor(F1, dtype=torch.float32), torch.tensor(F2, dtype=torch.float32), \
-           torch.tensor(F3, dtype=torch.float32), torch.tensor(Alpha2, dtype=torch.float32), \
-           torch.tensor(Alpha3, dtype=torch.float32)
-
-def GenerateBmatrix(Alpha2, Alpha3, n=10):
-    B = torch.zeros((n, 3, 3))
-    l1, l2, l3, l4 = 14.5, 14, 2.7, 2.7
-    
-    a2_rad = Alpha2 * torch.pi / 180
-    a3_rad = Alpha3 * torch.pi / 180
-    
-    B[:, 0, 1] = torch.cos(a2_rad)
-    B[:, 0, 2] = torch.cos(a3_rad)
-    B[:, 1, 0] = 1
-    B[:, 1, 1] = torch.sin(a2_rad)
-    B[:, 1, 2] = torch.sin(a3_rad)
-    B[:, 2, 0] = l2
-    B[:, 2, 1] = l1*torch.sin(a2_rad) - l3*torch.cos(a2_rad)
-    B[:, 2, 2] = l1*torch.sin(a3_rad) - l4*torch.cos(a3_rad)
-    
-    return B
-
-def ComputeTau(F1, F2, F3, B):
-    F = torch.stack((F1, F2, F3), dim=1)
-    Tau = torch.bmm(B, F.unsqueeze(-1)).squeeze(-1)
-    return Tau
-
-class SimpleEncoder(nn.Module):
-    def __init__(self, input_size=3, hidden_size=16, output_size=5):
-        super(SimpleEncoder, self).__init__()
-        self.lstm1 = nn.LSTM(input_size, hidden_size, batch_first=True)
-        self.linear = nn.Linear(hidden_size, output_size)
-        self._initialize_weights()
+class ShipControlAllocator(nn.Module):
+    def __init__(self, input_dim=3, output_dim=5, hidden_dim=16, num_layers=2, sequence_length=10):
+        super(ShipControlAllocator, self).__init__()
         
-    def _initialize_weights(self):
+        self.input_dim = input_dim
+        self.output_dim = output_dim
+        self.hidden_dim = hidden_dim
+        self.num_layers = num_layers
+        self.sequence_length = sequence_length
+        
+        # Simplified architecture
+        self.encoder_lstm1 = nn.LSTM(input_dim, hidden_dim, num_layers, batch_first=True)
+        self.encoder_output = nn.Linear(hidden_dim, output_dim)
+        
+        # Decoder
+        self.decoder_lstm1 = nn.LSTM(output_dim, hidden_dim, num_layers, batch_first=True)
+        self.decoder_output = nn.Linear(hidden_dim, input_dim)
+        
+        self.init_weights()
+        
+        # Normalized constraints
+        self.max_limits = torch.tensor([1.0, 1.0, 1.0, 1.0, 1.0])
+        self.max_rates = torch.tensor([0.1, 0.1, 0.1, 0.1, 0.1])
+        
+        # Reasonable loss weights
+        self.k = torch.tensor([1.0, 1.0, 0.1, 0.1, 0.01, 0.1])
+    
+    def init_weights(self):
         for name, param in self.named_parameters():
             if 'weight' in name:
                 nn.init.xavier_uniform_(param, gain=0.1)
             elif 'bias' in name:
-                nn.init.constant_(param, 0)
-        
+                nn.init.constant_(param, 0.0)
+    
     def forward(self, x):
-        print(f"Encoder input shape: {x.shape}")
-        out1, (h, c) = self.lstm1(x)
-        batch_size, seq_len, hidden_size = out1.shape
-        out1_flat = out1.reshape(-1, hidden_size)
-        output_flat = self.linear(out1_flat)
-        output = output_flat.reshape(batch_size, seq_len, -1)
-        output = torch.clamp(output, -10.0, 10.0)
-        print(f"Encoder output shape: {output.shape}")
-        return output
-
-class SimpleDecoder(nn.Module):
-    def __init__(self, input_size=5, hidden_size=16, output_size=3):
-        super(SimpleDecoder, self).__init__()
-        self.lstm1 = nn.LSTM(input_size, hidden_size, batch_first=True)
-        self.linear = nn.Linear(hidden_size, output_size)
+        batch_size = x.size(0)
         
-    def forward(self, x):
-        out1, _ = self.lstm1(x)
-        batch_size, seq_len, hidden_size = out1.shape
-        out1_flat = out1.reshape(-1, hidden_size)
-        output_flat = self.linear(out1_flat)
-        output = output_flat.reshape(batch_size, seq_len, -1)
-        return output
+        # Encoder
+        x_enc, _ = self.encoder_lstm1(x)
+        commands = self.encoder_output(x_enc[:, -1, :])
+        
+        # Decoder
+        commands_expanded = commands.unsqueeze(1).repeat(1, self.sequence_length, 1)
+        x_dec, _ = self.decoder_lstm1(commands_expanded)
+        reconstructed = self.decoder_output(x_dec)
+        
+        return commands, reconstructed
+    
+    def loss_L1(self, reconstructed, original):
+        return nn.MSELoss()(reconstructed, original)
+    
+    def loss_L2(self, commands):
+        violations = torch.clamp(torch.abs(commands) - self.max_limits.to(commands.device), min=0)
+        return torch.mean(violations)
+    
+    def loss_L3(self, commands):
+        if commands.size(0) > 1:
+            rates = torch.abs(commands[1:] - commands[:-1])
+            violations = torch.clamp(rates - self.max_rates.to(commands.device), min=0)
+            return torch.mean(violations)
+        return torch.tensor(0.0).to(commands.device)
+    
+    def loss_L4(self, commands):
+        forces = torch.abs(commands[:, [0, 1, 3]])
+        power = torch.mean(torch.pow(forces + 1e-8, 1.5))
+        return power
+    
+    def loss_L5(self, commands):
+        angles = commands[:, [2, 4]]
+        sector_violation = torch.clamp(torch.abs(angles) - 0.8, min=0)
+        return torch.mean(sector_violation)
+    
+    def compute_total_loss(self, commands, reconstructed, original):
+        l1 = self.loss_L1(reconstructed, original)
+        l2 = self.loss_L2(commands)
+        l3 = self.loss_L3(commands)
+        l4 = self.loss_L4(commands)
+        l5 = self.loss_L5(commands)
+        
+        individual_losses = (l1.item(), l2.item(), l3.item(), l4.item(), l5.item())
+        
+        total_loss = (self.k[0] * l1 + self.k[1] * l1 +
+                     self.k[2] * l2 + self.k[3] * l3 + 
+                     self.k[4] * l4 + self.k[5] * l5)
+        
+        return total_loss, individual_losses
 
-class DebugAutoencoder(nn.Module):
+class TrainingPlotter:
     def __init__(self):
-        super(DebugAutoencoder, self).__init__()
-        self.encoder = SimpleEncoder()
-        self.decoder = SimpleDecoder()
+        plt.ion()  # Interactive mode
+        self.fig, (self.ax1, self.ax2) = plt.subplots(2, 1, figsize=(12, 8))
+        self.train_losses = []
+        self.val_losses = []
+        self.individual_losses = []
+        self.epochs = []
         
-    def forward(self, x):
-        encoded = self.encoder(x)
-        decoded = self.decoder(encoded)
-        return encoded, decoded
+    def update(self, epoch, train_loss, val_loss, individual_loss):
+        self.epochs.append(epoch)
+        self.train_losses.append(train_loss)
+        self.val_losses.append(val_loss)
+        self.individual_losses.append(individual_loss)
+        
+        self.ax1.clear()
+        self.ax2.clear()
+        
+        # Plot total losses
+        self.ax1.plot(self.epochs, self.train_losses, 'b-', label='Training Loss', linewidth=2)
+        self.ax1.plot(self.epochs, self.val_losses, 'r-', label='Validation Loss', linewidth=2)
+        self.ax1.set_ylabel('Total Loss')
+        self.ax1.set_yscale('log')
+        self.ax1.legend()
+        self.ax1.grid(True)
+        self.ax1.set_title(f'Training Progress - Epoch {epoch}')
+        
+        # Plot individual losses
+        individual_losses = np.array(self.individual_losses)
+        labels = ['L1 (Recon)', 'L2 (Magnitude)', 'L3 (Rate)', 'L4 (Power)', 'L5 (Sector)']
+        colors = ['red', 'blue', 'green', 'orange', 'purple']
+        
+        for i in range(5):
+            self.ax2.plot(self.epochs, individual_losses[:, i], 
+                         color=colors[i], label=labels[i], linewidth=2)
+        
+        self.ax2.set_ylabel('Individual Losses')
+        self.ax2.set_yscale('log')
+        self.ax2.legend()
+        self.ax2.grid(True)
+        self.ax2.set_xlabel('Epoch')
+        
+        plt.tight_layout()
+        plt.draw()
+        plt.pause(0.01)
+    
+    def close(self):
+        plt.ioff()
+        plt.show()
 
-class FixedPhysicsAwareEncoder(nn.Module):
-    def __init__(self, input_size=3, hidden_size=32, output_size=5):
-        super(FixedPhysicsAwareEncoder, self).__init__()
-        self.lstm1 = nn.LSTM(input_size, hidden_size, batch_first=True)
-        self.linear = nn.Linear(hidden_size, output_size)
-        self._initialize_weights()
+class ShipControlTrainer:
+    def __init__(self, ship_params):
+        self.ship_params = ship_params
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        print(f"Using device: {self.device}")
         
-    def _initialize_weights(self):
-        for name, param in self.named_parameters():
-            if 'weight' in name:
-                nn.init.xavier_uniform_(param, gain=1.0)  # Increased gain
-            elif 'bias' in name:
-                nn.init.constant_(param, 0)
+        # Data normalization parameters
+        self.X_mean = None
+        self.X_std = None
+        self.y_mean = None
+        self.y_std = None
+        
+    def normalize_data(self, X, y):
+        if self.X_mean is None:
+            self.X_mean = np.mean(X, axis=(0, 1))
+            self.X_std = np.std(X, axis=(0, 1)) + 1e-8
+            self.y_mean = np.mean(y, axis=0)
+            self.y_std = np.std(y, axis=0) + 1e-8
+        
+        X_normalized = (X - self.X_mean) / self.X_std
+        y_normalized = (y - self.y_mean) / self.y_std
+        
+        return X_normalized, y_normalized
     
-    def forward(self, x):
-        print(f"FixedPhysicsEncoder input shape: {x.shape}")
-        out1, (h, c) = self.lstm1(x)
-        batch_size, seq_len, hidden_size = out1.shape
-        out1_flat = out1.reshape(-1, hidden_size)
-        output_flat = self.linear(out1_flat)
-        output = output_flat.reshape(batch_size, seq_len, -1)
+    def generate_training_data(self, num_samples=5000, sequence_length=10):
+        # Normalized ranges
+        F1_range = [-1.0, 1.0]
+        F2_range = [-0.5, 0.5]
+        F3_range = [-0.5, 0.5]
+        a_range = [-1.0, 1.0]
         
-        # FIXED: Direct scaling without tanh bottleneck and no in-place operations
-        # Based on your actual command ranges: [-451, 935] for forces, [-90, 90] for angles
+        commands = []
+        current = np.array([0.0, 0.0, 0.0, 0.0, 0.0], dtype=np.float64)
         
-        # Scale outputs to match your actual data ranges - create new tensors, don't modify in place
-        F1 = output[:, :, 0] * 500    # F1: roughly ±1000 range
-        F2 = output[:, :, 1] * 300    # F2: roughly ±600 range  
-        Alpha2 = torch.clamp(output[:, :, 2] * 45, -90, 90)    # Alpha2: [-90, 90]
-        F3 = output[:, :, 3] * 300    # F3: roughly ±600 range
-        Alpha3 = torch.clamp(output[:, :, 4] * 45, -90, 90)    # Alpha3: [-90, 90]
-        
-        # Stack the results into a new tensor
-        output = torch.stack([F1, F2, Alpha2, F3, Alpha3], dim=-1)
-        
-        print(f"FixedPhysicsEncoder output shape: {output.shape}")
-        print(f"Sample physics outputs at timestep 0:")
-        print(f"  Batch 0: F1={output[0, 0, 0]:.1f}, F2={output[0, 0, 1]:.1f}, A2={output[0, 0, 2]:.1f}°, F3={output[0, 0, 3]:.1f}, A3={output[0, 0, 4]:.1f}°")
-        if batch_size > 1:
-            print(f"  Batch 1: F1={output[1, 0, 0]:.1f}, F2={output[1, 0, 1]:.1f}, A2={output[1, 0, 2]:.1f}°, F3={output[1, 0, 3]:.1f}, A3={output[1, 0, 4]:.1f}°")
-        
-        return output
-
-class AdaptivePhysicsEncoder(nn.Module):
-    def __init__(self, input_size=3, hidden_size=64, output_size=5):
-        super(AdaptivePhysicsEncoder, self).__init__()
-        self.lstm1 = nn.LSTM(input_size, hidden_size, batch_first=True)
-        self.linear = nn.Linear(hidden_size, output_size)
-        
-        # Learnable output scaling parameters
-        self.force_scale = nn.Parameter(torch.tensor([800.0, 400.0, 400.0]))  # F1, F2, F3
-        self.angle_scale = nn.Parameter(torch.tensor([60.0, 60.0]))  # Alpha2, Alpha3
-        
-        self._initialize_weights()
-        
-    def _initialize_weights(self):
-        for name, param in self.named_parameters():
-            if 'weight' in name:
-                nn.init.xavier_uniform_(param, gain=1.0)
-            elif 'bias' in name:
-                nn.init.constant_(param, 0)
-    
-    def forward(self, x):
-        print(f"AdaptiveEncoder input shape: {x.shape}")
-        out1, (h, c) = self.lstm1(x)
-        batch_size, seq_len, hidden_size = out1.shape
-        out1_flat = out1.reshape(-1, hidden_size)
-        output_flat = self.linear(out1_flat)
-        output = output_flat.reshape(batch_size, seq_len, -1)
-        
-        # Adaptive scaling with learnable parameters - no in-place operations
-        F1 = output[:, :, 0] * self.force_scale[0]    # F1
-        F2 = output[:, :, 1] * self.force_scale[1]    # F2  
-        Alpha2 = torch.clamp(output[:, :, 2] * self.angle_scale[0], -90, 90)    # Alpha2
-        F3 = output[:, :, 3] * self.force_scale[2]    # F3
-        Alpha3 = torch.clamp(output[:, :, 4] * self.angle_scale[1], -90, 90)    # Alpha3
-        
-        # Stack the results into a new tensor
-        output = torch.stack([F1, F2, Alpha2, F3, Alpha3], dim=-1)
-        
-        print(f"AdaptiveEncoder output shape: {output.shape}")
-        print(f"Learned scales: F_scales={self.force_scale.data}, A_scales={self.angle_scale.data}")
-        print(f"Sample outputs: F1={output[0, 0, 0]:.1f}, F2={output[0, 0, 1]:.1f}, A2={output[0, 0, 2]:.1f}°")
-        
-        return output
-
-class FixedPhysicsAwareAutoencoder(nn.Module):
-    def __init__(self, use_adaptive=True):
-        super(FixedPhysicsAwareAutoencoder, self).__init__()
-        if use_adaptive:
-            self.encoder = AdaptivePhysicsEncoder()
-        else:
-            self.encoder = FixedPhysicsAwareEncoder()
-        self.decoder = SimpleDecoder()
-        
-    def forward(self, x):
-        encoded = self.encoder(x)
-        decoded = self.decoder(encoded)
-        return encoded, decoded
-
-def create_physics_consistent_data():
-    """Create dataset where tau values correspond to optimal achievable thruster configurations"""
-    print("=== CREATING PHYSICS-CONSISTENT DATASET ===")
-    
-    num_sequences = 5
-    seq_length = 10
-    
-    all_Tau, all_Commands = [], []
-    
-    # Method 1: Generate tau first, then solve for optimal commands
-    for seq in range(num_sequences):
-        print(f"Generating sequence {seq}")
-        
-        tau_sequence = []
-        command_sequence = []
-        
-        for step in range(seq_length):
-            # Generate desired generalized forces (what motion controller would request)
-            # These should be in realistic ranges for ship operations
-            surge_force = np.random.uniform(-2000, 2000)    # Surge force [N]
-            sway_force = np.random.uniform(-1000, 1000)     # Sway force [N] 
-            yaw_moment = np.random.uniform(-5000, 5000)     # Yaw moment [N⋅m]
+        for i in range(num_samples):
+            step = np.random.normal(0, 0.01, 5).astype(np.float64)
+            step[0] *= 0.1
+            step[1] *= 0.05
+            step[2] *= 0.01
+            step[3] *= 0.05
+            step[4] *= 0.01
             
-            desired_tau = torch.tensor([surge_force, sway_force, yaw_moment], dtype=torch.float32)
+            current += step
             
-            # Find optimal thruster configuration for this tau using analytical solution
-            optimal_commands = solve_optimal_allocation(desired_tau)
+            current[0] = np.clip(current[0], F1_range[0], F1_range[1])
+            current[1] = np.clip(current[1], F2_range[0], F2_range[1])
+            current[2] = np.clip(current[2], a_range[0], a_range[1])
+            current[3] = np.clip(current[3], F3_range[0], F3_range[1])
+            current[4] = np.clip(current[4], a_range[0], a_range[1])
             
-            tau_sequence.append(desired_tau)
-            command_sequence.append(optimal_commands)
+            commands.append(current.copy())
         
-        all_Tau.append(torch.stack(tau_sequence))
-        all_Commands.append(torch.stack(command_sequence))
+        commands = np.array(commands, dtype=np.float32)
         
-        # Print statistics
-        tau_tensor = torch.stack(tau_sequence)
-        cmd_tensor = torch.stack(command_sequence)
-        print(f"  Sequence {seq} - Tau range: [{tau_tensor.min().item():.2f}, {tau_tensor.max().item():.2f}]")
-        print(f"  Commands - F1: [{cmd_tensor[:, 0].min().item():.1f}, {cmd_tensor[:, 0].max().item():.1f}]")
-        print(f"           - Alpha2: [{cmd_tensor[:, 2].min().item():.1f}, {cmd_tensor[:, 2].max().item():.1f}]")
-    
-    # Stack all sequences
-    Tau_sequences = torch.stack(all_Tau)        # [num_seq, seq_len, 3]
-    Commands_sequences = torch.stack(all_Commands)  # [num_seq, seq_len, 5]
-    
-    print(f"Final shapes: Tau={Tau_sequences.shape}, Commands={Commands_sequences.shape}")
-    
-    return Tau_sequences, Commands_sequences
-
-def solve_optimal_allocation(desired_tau):
-    """Solve for optimal thruster allocation given desired tau"""
-    # This implements a simple analytical solution for your 3-thruster system
-    # In practice, you'd use optimization, but this gives a reasonable approximation
-    
-    tau_x, tau_y, tau_n = desired_tau[0].item(), desired_tau[1].item(), desired_tau[2].item()
-    
-    # Thruster geometry parameters
-    l1, l2, l3, l4 = 14.5, 14, 2.7, 2.7
-    
-    # Method: Use simplified allocation strategy
-    
-    # Strategy 1: Try to minimize thruster usage while meeting force requirements
-    
-    # For yaw-dominant requests, use azimuth thrusters efficiently
-    if abs(tau_n) > abs(tau_x) + abs(tau_y):
-        # Yaw-dominant: set angles for maximum yaw efficiency
-        alpha2 = 45.0 if tau_n > 0 else -45.0
-        alpha3 = -45.0 if tau_n > 0 else 45.0
-    
-    # For surge-dominant requests  
-    elif abs(tau_x) > abs(tau_y):
-        # Surge-dominant: align thrusters with X-axis
-        alpha2 = 0.0
-        alpha3 = 0.0
-    
-    # For sway-dominant requests
-    else:
-        # Sway-dominant: align thrusters with Y-axis
-        alpha2 = 90.0 if tau_y > 0 else -90.0
-        alpha3 = 90.0 if tau_y > 0 else -90.0
-    
-    # Clamp angles to reasonable range
-    alpha2 = np.clip(alpha2, -90, 90)
-    alpha3 = np.clip(alpha3, -90, 90)
-    
-    # Compute B matrix for these angles
-    alpha2_tensor = torch.tensor([alpha2], dtype=torch.float32)
-    alpha3_tensor = torch.tensor([alpha3], dtype=torch.float32)
-    B = GenerateBmatrix(alpha2_tensor, alpha3_tensor, 1)[0]  # Get first (and only) matrix
-    
-    # Solve for forces using pseudo-inverse: F = B† × tau
-    try:
-        B_pinv = torch.pinverse(B)  # Pseudo-inverse for least-squares solution
-        forces = torch.matmul(B_pinv, desired_tau.unsqueeze(-1)).squeeze(-1)
-        
-        F1, F2, F3 = forces[0].item(), forces[1].item(), forces[2].item()
-        
-        # Clamp forces to realistic ranges
-        F1 = np.clip(F1, -2000, 2000)
-        F2 = np.clip(F2, -1000, 1000) 
-        F3 = np.clip(F3, -1000, 1000)
-        
-    except:
-        # Fallback: use simple heuristic allocation
-        F1 = tau_x * 0.5  # Tunnel thruster contributes to surge
-        F2 = tau_y * 0.5  # Azimuth thrusters contribute to sway  
-        F3 = tau_y * 0.5
-        
-        F1 = np.clip(F1, -2000, 2000)
-        F2 = np.clip(F2, -1000, 1000)
-        F3 = np.clip(F3, -1000, 1000)
-    
-    # Return command vector: [F1, F2, Alpha2, F3, Alpha3]
-    commands = torch.tensor([F1, F2, alpha2, F3, alpha3], dtype=torch.float32)
-    
-    return commands
-
-def debug_training_fixed():
-    """Training with properly scaled physics-aware encoder"""
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Using device: {device}")
-    
-    # Create minimal dataset
-    tau_sequences, commands_sequences = create_physics_consistent_data()
-    
-    print(f"BEFORE SCALING:")
-    print(f"Tau range: [{tau_sequences.min().item():.2f}, {tau_sequences.max().item():.2f}]")
-    print(f"Commands range: [{commands_sequences.min().item():.2f}, {commands_sequences.max().item():.2f}]")
-    
-    # Scale only tau inputs
-    tau_flat = tau_sequences.reshape(-1, 3)
-    input_scaler = StandardScaler()
-    tau_scaled = input_scaler.fit_transform(tau_flat.numpy())
-    
-    tau_tensor = torch.tensor(tau_scaled.reshape(5, 10, 3), dtype=torch.float32).to(device)
-    commands_tensor = commands_sequences.to(device)
-    
-    print(f"AFTER SCALING:")
-    print(f"Tau (scaled): [{tau_tensor.min().item():.3f}, {tau_tensor.max().item():.3f}]")
-    print(f"Commands (original): [{commands_tensor.min().item():.2f}, {commands_tensor.max().item():.2f}]")
-    
-    # Create FIXED physics-aware model
-    model = FixedPhysicsAwareAutoencoder(use_adaptive=True).to(device)
-    optimizer = optim.Adam(model.parameters(), lr=0.0005)
-    
-    print(f"\n=== STARTING FIXED PHYSICS-AWARE TRAINING ===")
-    
-    def physics_loss(encoded, original_tau):
-        batch_size, seq_len, _ = encoded.shape
-        encoded_flat = encoded.reshape(-1, 5)
-        tau_flat = original_tau.reshape(-1, 3)
-        
-        # Extract commands (already in correct units)
-        F1 = encoded_flat[:, 0]
-        F2 = encoded_flat[:, 1]
-        Alpha2 = encoded_flat[:, 2]
-        F3 = encoded_flat[:, 3]
-        Alpha3 = encoded_flat[:, 4]
-        
-        print(f"Command ranges: F1=[{F1.min():.1f},{F1.max():.1f}], Alpha2=[{Alpha2.min():.1f},{Alpha2.max():.1f}]")
-        
-        # Physics computation
-        n = F1.shape[0]
-        B = GenerateBmatrix(Alpha2, Alpha3, n).to(device)
-        reconstructed_tau = ComputeTau(F1, F2, F3, B)
-        
-        # Unscale tau_flat to compare in original units
-        tau_original = input_scaler.inverse_transform(tau_flat.detach().cpu().numpy())
-        tau_original_tensor = torch.tensor(tau_original, device=device)
-        
-        loss = nn.MSELoss()(reconstructed_tau, tau_original_tensor)
-        
-        print(f"Sample comparison (original units):")
-        print(f"  Target: {tau_original_tensor[0].cpu().numpy()}")
-        print(f"  Predicted: {reconstructed_tau[0].detach().cpu().numpy()}")
-        print(f"  Physics loss: {loss.item():.6f}")
-        
-        return loss * 0.01  # Small scaling factor
-    
-    # Training loop
-    for epoch in range(20):  # More epochs since we have better scaling
-        print(f"\n--- EPOCH {epoch} ---")
-        
-        model.train()
-        optimizer.zero_grad()
-        
-        # Forward pass
-        encoded, decoded = model(tau_tensor)
-        
-        # Compute losses
-        L0 = physics_loss(encoded, tau_tensor)
-        L1 = nn.MSELoss()(decoded, tau_tensor)
-        
-        total_loss = L0 + L1
-        
-        print(f"Epoch {epoch}: L0={L0.item():.6f}, L1={L1.item():.6f}, Total={total_loss.item():.6f}")
-        
-        # Early stopping if physics loss gets reasonable
-        if L0.item() < 10.0:
-            print("Physics loss reached reasonable level!")
-        
-        # Backward pass
-        total_loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-        optimizer.step()
-        
-        # Print max gradient
-        max_grad = max(p.grad.norm().item() for p in model.parameters() if p.grad is not None)
-        print(f"  Max gradient norm: {max_grad:.6f}")
-    
-    # Physics verification test
-    print(f"\n=== FINAL PHYSICS TEST ===")
-    model.eval()
-    with torch.no_grad():
-        simple_tau = torch.tensor([[
-            [0.0, 0.0, 1000.0],  # Pure yaw moment
-            [1000.0, 0.0, 0.0], # Pure surge force
-            [0.0, 1000.0, 0.0], # Pure sway force
-        ]], dtype=torch.float32)
-        
-        simple_tau_scaled = input_scaler.transform(simple_tau.reshape(-1, 3))
-        simple_tau_tensor = torch.tensor(simple_tau_scaled.reshape(1, 3, 3), dtype=torch.float32).to(device)
-        
-        encoded, decoded = model(simple_tau_tensor)
-        
-        print(f"Physics verification:")
-        for i in range(3):
-            commands = encoded[0, i, :].cpu().numpy()
-            F1, F2, Alpha2, F3, Alpha3 = commands
-            print(f"  Input tau: {simple_tau[0, i, :].numpy()}")
-            print(f"  Predicted commands: F1={F1:.1f}, F2={F2:.1f}, A2={Alpha2:.1f}°, F3={F3:.1f}, A3={Alpha3:.1f}°")
+        # Calculate generalized forces
+        generalized_forces = []
+        for cmd in commands:
+            F1, F2, a2, F3, a3 = cmd
+            F1_denorm = F1 * 10000
+            F2_denorm = F2 * 5000
+            F3_denorm = F3 * 5000
+            a2_denorm = a2 * np.pi
+            a3_denorm = a3 * np.pi
             
-            # Verify by computing tau back
-            B_test = GenerateBmatrix(torch.tensor([Alpha2]), torch.tensor([Alpha3]), 1)
-            tau_verify = ComputeTau(torch.tensor([F1]), torch.tensor([F2]), torch.tensor([F3]), B_test)
-            print(f"  Reconstructed tau: {tau_verify[0].numpy()}")
-            error = torch.abs(tau_verify[0] - torch.tensor(simple_tau[0, i, :]))
-            print(f"  Error: {error.numpy()}")
-            print()
-
-def quick_infinity_check():
-    """Quick test to see if we can reproduce the infinity issue"""
-    print("\n" + "="*50)
-    print("QUICK INFINITY CHECK")
-    print("="*50)
+            surge = F1_denorm + F2_denorm * np.cos(a2_denorm) + F3_denorm * np.cos(a3_denorm)
+            sway = F2_denorm * np.sin(a2_denorm) + F3_denorm * np.sin(a3_denorm)
+            yaw = 5 * F2_denorm * np.sin(a2_denorm) - 8 * F3_denorm * np.cos(a3_denorm)
+            
+            surge_norm = surge / 20000.0
+            sway_norm = sway / 10000.0
+            yaw_norm = yaw / 50000.0
+            
+            generalized_forces.append([surge_norm, sway_norm, yaw_norm])
+        
+        X = np.array(generalized_forces, dtype=np.float32)
+        y = commands.astype(np.float32)
+        
+        # Create sequences
+        X_seq, y_seq = [], []
+        for i in range(len(X) - sequence_length):
+            X_seq.append(X[i:i+sequence_length])
+            y_seq.append(y[i+sequence_length])
+        
+        X_seq = np.array(X_seq, dtype=np.float32)
+        y_seq = np.array(y_seq, dtype=np.float32)
+        
+        return X_seq, y_seq
     
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    
-    # Test 1: Check what your model outputs initially
-    print("1. Testing untrained model outputs:")
-    model = DebugAutoencoder().to(device)
-    
-    test_input = torch.randn(2, 5, 3).to(device)
-    print(f"Test input range: [{test_input.min().item():.3f}, {test_input.max().item():.3f}]")
-    
-    with torch.no_grad():
+    def train(self, epochs=50, batch_size=32, learning_rate=0.001):
+        print("Generating training data...")
+        X_train, y_train = self.generate_training_data(num_samples=5000, sequence_length=10)
+        
+        # Split into train/validation
+        split_idx = int(0.8 * len(X_train))
+        X_val, y_val = X_train[split_idx:], y_train[split_idx:]
+        X_train, y_train = X_train[:split_idx], y_train[:split_idx]
+        
+        print(f"Training data: {X_train.shape}, Validation data: {X_val.shape}")
+        
+        # Normalize data
+        X_train_norm, y_train_norm = self.normalize_data(X_train, y_train)
+        X_val_norm, y_val_norm = self.normalize_data(X_val, y_val)
+        
+        # Create datasets
+        train_dataset = ShipControlDataset(X_train_norm, y_train_norm)
+        val_dataset = ShipControlDataset(X_val_norm, y_val_norm)
+        
+        train_loader = DataLoader(train_dataset, batch_size=min(batch_size, len(train_dataset)), shuffle=True)
+        val_loader = DataLoader(val_dataset, batch_size=min(batch_size, len(val_dataset)), shuffle=False)
+        
+        # Initialize model and optimizer
+        model = ShipControlAllocator().to(self.device)
+        optimizer = optim.Adam(model.parameters(), lr=learning_rate, weight_decay=1e-5)
+        scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=5, factor=0.5)
+        
+        # Initialize plotting
+        plotter = TrainingPlotter()
+        
+        print("Starting training...")
+        best_val_loss = float('inf')
+        
         try:
-            encoded, decoded = model(test_input)
-            print(f"Encoded range: [{encoded.min().item():.3f}, {encoded.max().item():.3f}]")
-            print(f"Any inf in encoded? {torch.isinf(encoded).any()}")
-            print(f"Any nan in encoded? {torch.isnan(encoded).any()}")
-        except Exception as e:
-            print(f"Error in model forward pass: {e}")
-    
-    # Test 2: Test physics computation with extreme values
-    print("\n2. Testing physics computation with extreme values:")
-    extreme_angles = torch.tensor([-500, -90, 0, 90, 500], dtype=torch.float32)
-    extreme_forces = torch.tensor([50000, 10000, 0, -10000, -50000], dtype=torch.float32)
-    
-    try:
-        B = GenerateBmatrix(extreme_angles, extreme_angles, 5)
-        tau = ComputeTau(extreme_forces, extreme_forces, extreme_forces, B)
-        print(f"Max tau with extreme inputs: {torch.abs(tau).max().item():.2e}")
-        
-        if torch.abs(tau).max() > 1e6:
-            print("WARNING: Physics computation produces huge values!")
-        else:
-            print("Physics computation looks reasonable")
+            for epoch in range(epochs):
+                # Training phase
+                model.train()
+                train_loss = 0
+                individual_losses_epoch = np.zeros(5)
+                num_batches = 0
+                
+                for batch_X, batch_y in train_loader:
+                    batch_X = batch_X.to(self.device)
+                    
+                    if len(batch_X.shape) == 2:
+                        batch_size_val = batch_X.size(0)
+                        if batch_X.size(1) == 30:  # 10*3
+                            batch_X = batch_X.view(batch_size_val, 10, 3)
+                        else:
+                            continue
+                    
+                    optimizer.zero_grad()
+                    
+                    commands, reconstructed = model(batch_X)
+                    loss, individual_losses = model.compute_total_loss(commands, reconstructed, batch_X)
+                    
+                    loss.backward()
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.1)
+                    optimizer.step()
+                    
+                    train_loss += loss.item()
+                    individual_losses_epoch += np.array(individual_losses)
+                    num_batches += 1
+                
+                if num_batches == 0:
+                    continue
+                    
+                avg_train_loss = train_loss / num_batches
+                avg_individual_losses = individual_losses_epoch / num_batches
+                
+                # Validation phase
+                model.eval()
+                val_loss = 0
+                num_val_batches = 0
+                
+                with torch.no_grad():
+                    for batch_X, batch_y in val_loader:
+                        batch_X = batch_X.to(self.device)
+                        
+                        if len(batch_X.shape) == 2:
+                            batch_size_val = batch_X.size(0)
+                            if batch_X.size(1) == 30:
+                                batch_X = batch_X.view(batch_size_val, 10, 3)
+                            else:
+                                continue
+                        
+                        commands, reconstructed = model(batch_X)
+                        loss, _ = model.compute_total_loss(commands, reconstructed, batch_X)
+                        val_loss += loss.item()
+                        num_val_batches += 1
+                
+                avg_val_loss = val_loss / num_val_batches if num_val_batches > 0 else avg_train_loss
+                
+                # Update learning rate
+                scheduler.step(avg_val_loss)
+                
+                # Update plot
+                plotter.update(epoch + 1, avg_train_loss, avg_val_loss, avg_individual_losses)
+                
+                # Print progress
+                if epoch % 5 == 0:
+                    current_lr = optimizer.param_groups[0]['lr']
+                    print(f'Epoch {epoch+1}/{epochs}, Train Loss: {avg_train_loss:.4f}, '
+                          f'Val Loss: {avg_val_loss:.4f}, LR: {current_lr:.6f}')
+                
+                # Save best model
+                if avg_val_loss < best_val_loss:
+                    best_val_loss = avg_val_loss
+                    torch.save(model.state_dict(), 'best_model.pth')
             
-    except Exception as e:
-        print(f"ERROR in physics computation: {e}")
+            print("Training completed!")
+            
+        except KeyboardInterrupt:
+            print("Training interrupted by user")
+        
+        finally:
+            plotter.close()
+        
+        return model
+    
+    def allocate_control(self, model, force_request):
+        model.eval()
+        
+        with torch.no_grad():
+            # Normalize force request
+            force_request_norm = (np.array(force_request) - self.X_mean) / self.X_std
+            force_tensor = torch.FloatTensor(force_request_norm).to(self.device)
+            
+            # Create sequence
+            force_sequence = force_tensor.unsqueeze(0).unsqueeze(0).repeat(1, 10, 1)
+            
+            commands_norm, _ = model(force_sequence)
+            commands = commands_norm.cpu().numpy()[0] * self.y_std + self.y_mean
+            
+            return commands
+
+def main():
+    # Ship parameters
+    ship_params = {
+        'mass': 1.07e6,
+        'length': 28.9,
+        'breadth': 9.6,
+        'draft': 2.8
+    }
+    
+    # Create trainer
+    trainer = ShipControlTrainer(ship_params)
+    
+    # Train model
+    model = trainer.train(epochs=50, batch_size=32, learning_rate=0.001)
+    
+    # Test allocation
+    force_request = [1000.0/20000, 500.0/10000, 200.0/50000]  # Normalized
+    commands = trainer.allocate_control(model, force_request)
+    
+    # Denormalize commands
+    commands_denorm = commands * np.array([10000, 5000, np.pi, 5000, np.pi])
+    
+    print(f"\nForce request: {force_request}")
+    print(f"Allocated commands (denormalized):")
+    print(f"  T1 force: {commands_denorm[0]:.2f} N")
+    print(f"  T2 force: {commands_denorm[1]:.2f} N, angle: {np.rad2deg(commands_denorm[2]):.2f} deg")
+    print(f"  T3 force: {commands_denorm[3]:.2f} N, angle: {np.rad2deg(commands_denorm[4]):.2f} deg")
+    
+    # Save final model
+    torch.save(model.state_dict(), 'ship_control_allocator_final.pth')
+    print("\nModel saved!")
 
 if __name__ == "__main__":
-    # First run the infinity check
-    quick_infinity_check()
-    
-    # Then run the fixed physics-aware training
-    print("\n" + "="*60)
-    print("RUNNING FIXED PHYSICS-AWARE TRAINING")
-    print("="*60)
-    try:
-        debug_training_fixed()
-    except Exception as e:
-        print(f"Error in physics-aware training: {e}")
-        import traceback
-        traceback.print_exc()
+    main()

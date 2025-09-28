@@ -57,7 +57,7 @@ def GenerateData(n = 100):
 def GenerateBmatrix(Alpha2, Alpha3, n = 100):
     B = torch.zeros((n, 3, 3))
     # Lengths
-    l1,l2,l3,l4 = 14.5, 14, 2.7, 2.7
+    l1,l2,l3,l4 = -14, 14.5, -2.7, 2.7
     
     # Convert degrees to radians
     a2_rad = Alpha2* torch.pi / 180
@@ -189,6 +189,10 @@ class Autoencoder(nn.Module):
         decoded = self.decoder(encoded)
         
         return encoded, decoded
+    def printEncodings(self, x):
+        encoded = self.encoder(x)
+        print(f"Encoded outputs: {encoded}")
+        return encoded
 
 def ComputeL0Loss(encoded_commands, original_tau, output_scaler, device):
     # Step 1: Extract components from encoded_commands
@@ -430,7 +434,7 @@ if __name__ == "__main__":
     torch.manual_seed(42)
     np.random.seed(42)
     
-    F1, F2, F3, Alpha2, Alpha3, Tau = GenerateLargeDataset(num_sequences=2000, sequence_length=500)
+    F1, F2, F3, Alpha2, Alpha3, Tau = GenerateLargeDataset(num_sequences=3, sequence_length=5)
     thruster_commands = torch.stack([F1, F2, Alpha2, F3, Alpha3], dim=1)  # Shape: [1000000, 5]
     # print(f"Thruster commands shape: {thruster_commands.shape}")
     # print(f"Final shapes:")
@@ -524,6 +528,7 @@ if __name__ == "__main__":
     
     # Initialize model, optimizer, and loss
     model = Autoencoder(hidden_size=64, dropout_rate=0.2).to(device)
+    
     optimizer = optim.Adam(model.parameters(), lr=0.0005)
     criterion = nn.MSELoss()
     
@@ -540,11 +545,11 @@ if __name__ == "__main__":
     best_epoch = 0
     
     # Loss Hyperparameters
-    k0 = 10
+    k0 = 1
     k1 = 1
     k2 = 0.1
     k3 = 1e-7
-    k4 = 1e-8
+    k4 = 1e-7
     k5 = 0.1
     for epoch in range(num_epochs):
         model.train()
@@ -662,6 +667,7 @@ if __name__ == "__main__":
         test_scaled = input_scaler.transform(test_inputs.numpy())
         test_tensor = torch.tensor(test_scaled).to(device)
         _, reconstructed_tau = model(test_tensor)
+        model.printEncodings(test_tensor)
         unscaledReconstructedTau = input_scaler.inverse_transform(reconstructed_tau.cpu().numpy())
         
         for i, pred in enumerate(unscaledReconstructedTau):
