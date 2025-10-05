@@ -66,7 +66,6 @@ train_transforms = transforms.Compose([
     # transforms.RandomAdjustSharpness(sharpness_factor=2, p=0.5), # Randomly adjust sharpness
     # transforms.RandomAffine(degrees=0, translate=(0.1, 0.1)), # Randomly translate the image by 10% in both directions
     # transforms.RandomGrayscale(p=0.1), # 10% chance of converting to grayscale
-    # ADD MORE AUGMENTATIONS HERE - what makes sense for vehicles?
     transforms.ToTensor(),  # Convert to tensor
     transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])  # ImageNet normalization
 ])
@@ -103,8 +102,6 @@ def freeze_backbone(model):
     """
     Freeze all layers EXCEPT the final fc layer (head)
     """
-    # TODO: Loop through model parameters
-    # For all layers except fc, set requires_grad = False
     for params in model.parameters():
         params.requires_grad = False
     for params in model.fc.parameters():
@@ -190,10 +187,10 @@ def validate(dataloader, model, loss_fn, epoch, writer):
 
 if __name__ == '__main__':
     # 1. Setup
-    loss_fn = nn.CrossEntropyLoss()  # What loss function for classification?
+    loss_fn = nn.CrossEntropyLoss() 
     
     # 2. Create checkpoint directory
-    checkpoint_dir = Path("checkpoints") / params.name  # Use params.name
+    checkpoint_dir = Path("checkpoints") / params.name 
     checkpoint_dir.mkdir(parents=True, exist_ok=True) 
     
     # 3. TensorBoard writer
@@ -205,7 +202,7 @@ if __name__ == '__main__':
     print("="*50)
     
     model = freeze_backbone(model)
-    optimizer = optim.Adam(model.parameters(), lr=params.lr, weight_decay=params.weight_decay)  # Use params.lr
+    optimizer = optim.Adam(model.parameters(), lr=params.lr, weight_decay=params.weight_decay)  
     
     for epoch in range(params.epochs_phase1):
         # Train
@@ -224,7 +221,7 @@ if __name__ == '__main__':
         }
 
         torch.save(checkpoint, checkpoint_dir / f"model_epoch_{epoch}.pth")
-        torch.save(checkpoint, checkpoint_dir / "checkpoint.pth")  # Also save as latest
+        torch.save(checkpoint, checkpoint_dir / "checkpoint.pth")  
     
     # ===== PHASE 2: Fine-tune everything =====
     print("="*50)
@@ -232,7 +229,7 @@ if __name__ == '__main__':
     print("="*50)
     
     model = unfreeze_all(model)
-    optimizer = optim.Adam(model.parameters(), lr=params.lr_phase2, weight_decay=params.weight_decay)   # Use params.lr_phase2 (lower!)
+    optimizer = optim.Adam(model.parameters(), lr=params.lr_phase2, weight_decay=params.weight_decay)  
     
     for epoch in range(params.epochs_phase1, params.epochs_phase1 + params.epochs_phase2):
         # Train
@@ -240,7 +237,6 @@ if __name__ == '__main__':
         # Validate
         acc = validate(val_loader, model, loss_fn, epoch, writer)
         # Save checkpoint
-                # Save checkpoint
         checkpoint = {
             "model": model.state_dict(),        # model's state_dict
             "optimizer":   optimizer.state_dict() , # optimizer's state_dict
@@ -250,4 +246,4 @@ if __name__ == '__main__':
         }
 
         torch.save(checkpoint, checkpoint_dir / f"model_epoch_{epoch}.pth")
-        torch.save(checkpoint, checkpoint_dir / "checkpoint.pth")  # Also save as latest
+        torch.save(checkpoint, checkpoint_dir / "checkpoint.pth")  
