@@ -43,7 +43,7 @@ class Params:
         self.batch_size = 64
         self.lr = 1e-3
         self.lr_phase2 = 1e-4
-        self.epochs_phase1 = 10
+        self.epochs_phase1 = 20
         self.epochs_phase2 = 30
         self.weight_decay = 1e-4
         self.momentum = 0.9
@@ -60,7 +60,7 @@ train_transforms = transforms.Compose([
     transforms.RandomResizedCrop(224),  # Then random crop to 224x224
     transforms.RandomHorizontalFlip(p=0.5),  # 50% chance of flip
     # transforms.RandomPerspective(p = 0.5, distortion_scale=0.2), # 50% chance of perspective change
-    transforms.ColorJitter(brightness=0.2,contrast=0.2,saturation=0.2,hue=0.1), # Randomly change brightness, contrast, saturation and hue
+    transforms.ColorJitter(brightness=0.25,contrast=0.2,saturation=0.2,hue=0.25), # Randomly change brightness, contrast, saturation and hue
     transforms.RandomRotation(degrees=10), # Randomly rotate the image by 15 degrees
     # transforms.GaussianBlur(kernel_size=(5, 9), sigma=(0.1, 5)), # Apply Gaussian Blur
     # transforms.RandomAdjustSharpness(sharpness_factor=2, p=0.5), # Randomly adjust sharpness
@@ -78,6 +78,8 @@ val_transforms = transforms.Compose([
     transforms.ToTensor(),
     transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
 ])
+
+
 # Params
 params = Params()
 # Defining directory
@@ -93,6 +95,7 @@ val_loader = DataLoader(val_dataset, batch_size=params.batch_size, shuffle=False
 model = models.resnet18(pretrained=True)
 print(model.fc)
 model.fc = nn.Linear(512, 10)
+# model.fc = nn.Sequential(nn.Dropout(0.2),nn.Linear(512, 10))
 print(model.fc)
 model = model.to(device)
 
@@ -121,37 +124,40 @@ def train(dataloader, model, loss_fn, optimizer, epoch, writer):
     size = len(dataloader.dataset)
     model.train()
     start0 = time.time()
-    start = time.time()
+    
+    running_loss = 0.0
+    correct = 0
+    
     for batch, (X, y) in enumerate(dataloader):
         X, y = X.to(device), y.to(device)
 
         # Compute prediction error
         pred = model(X)
         loss = loss_fn(pred, y)
-
+        
         # Backpropagation
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
-        batch_size = len(X)
-        if batch % 5 == 0:
-            loss, current = loss.item(), (batch + 1) * batch_size
-            print(f"loss: {loss:>7f}  [{current:>5d}/{size:>5d}], {(current/size * 100):>4f}%")
-            step = epoch * size + current
-            writer.add_scalar('training loss',
-                            loss,
-                            step)
-            new_start = time.time()
-            delta = new_start - start
-            start = new_start
-            if batch != 0:
-                print("Done in ", delta, " seconds")
-                remaining_steps = size - current
-                speed = batch_size / delta
-                remaining_time = remaining_steps / speed
-                print("Remaining time (seconds): ", remaining_time)
         
-    print("Entire epoch done in ", time.time() - start0, " seconds")
+        # Accumulate metrics
+        running_loss += loss.item()
+        correct += (pred.argmax(1) == y).type(torch.float).sum().item()
+        
+        # Print progress every 5 batches
+        if batch % 5 == 0:
+            current = (batch + 1) * len(X)
+            print(f"loss: {loss.item():>7f}  [{current:>5d}/{size:>5d}]")
+    
+    # After loop - calculate epoch metrics
+    avg_train_loss = running_loss / len(dataloader)
+    accuracy = 100 * correct / size
+    
+    # Log to TensorBoard
+    writer.add_scalar('train_loss_per_epoch', avg_train_loss, epoch)
+    writer.add_scalar('train_accuracy_per_epoch', accuracy, epoch)
+    
+    print(f"Epoch {epoch} done in {time.time() - start0:.1f}s - Train Accuracy: {accuracy:.1f}%, Avg loss: {avg_train_loss:.4f}")
     
     
 def validate(dataloader, model, loss_fn, epoch, writer):
@@ -172,10 +178,10 @@ def validate(dataloader, model, loss_fn, epoch, writer):
     accuracy = 100 * correct / size
     
     # Log to TensorBoard
-    step = epoch * size
+    
     if writer is not None:
-        writer.add_scalar('validation_loss', val_loss, step)
-        writer.add_scalar('validation_accuracy', accuracy, step)
+        writer.add_scalar('validation_loss_epoch', val_loss, epoch) 
+        writer.add_scalar('validation_accuracy_epoch', accuracy, epoch)
     
     print(f"Validation - Accuracy: {accuracy:>0.1f}%, Avg loss: {val_loss:>8f}\n")
     
@@ -199,12 +205,12 @@ if __name__ == '__main__':
     print("="*50)
     
     model = freeze_backbone(model)
-    optimizer = optim.SGD(model.parameters(), lr=params.lr, weight_decay=params.weight_decay, momentum=params.momentum)  # Use params.lr
+    optimizer = optim.Adam(model.parameters(), lr=params.lr, weight_decay=params.weight_decay)  # Use params.lr
     
     for epoch in range(params.epochs_phase1):
         # Train
         train(train_loader,model,loss_fn,optimizer,epoch,writer)
-        
+        # print("Finished epoch : ", epoch)
         # Validate
         acc = validate(val_loader, model, loss_fn, epoch, writer)
         
@@ -226,7 +232,7 @@ if __name__ == '__main__':
     print("="*50)
     
     model = unfreeze_all(model)
-    optimizer = optim.SGD(model.parameters(), lr=params.lr_phase2, weight_decay=params.weight_decay, momentum=params.momentum)   # Use params.lr_phase2 (lower!)
+    optimizer = optim.Adam(model.parameters(), lr=params.lr_phase2, weight_decay=params.weight_decay)   # Use params.lr_phase2 (lower!)
     
     for epoch in range(params.epochs_phase1, params.epochs_phase1 + params.epochs_phase2):
         # Train

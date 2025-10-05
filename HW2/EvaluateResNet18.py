@@ -56,11 +56,13 @@ device = (
 print(f"Using {device} device")
 
 # 1. Create the same model architecture
-model = models.resnet18(pretrained=False)  # Don't need pretrained weights
-model.fc = nn.Linear(512, 10)  # Same modification you did before
+model = models.resnet18(pretrained=False) 
+model.fc = nn.Linear(512, 10) 
+# model.fc = nn.Sequential(nn.Dropout(0.2),nn.Linear(512, 10))
+
 
 # 2. Load the saved weights
-checkpoint = torch.load("HW2/checkpoints/HW2_ResNet18_Vehicle_Classifier/checkpoint.pth", weights_only=False)
+checkpoint = torch.load("checkpoints/HW2_ResNet18_Vehicle_Classifier/checkpoint.pth", weights_only=False)
 model.load_state_dict(checkpoint["model"])
 
 # 3. Set to evaluation mode
@@ -75,7 +77,7 @@ val_transforms = transforms.Compose([
     transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
 ])
 
-val_dataset = datasets.ImageFolder("HW2/archive/val", transform=val_transforms)
+val_dataset = datasets.ImageFolder("archive/val", transform=val_transforms)
 
 def denormalize(tensor, mean, std):
     """
