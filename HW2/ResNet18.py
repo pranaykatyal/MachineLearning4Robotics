@@ -78,3 +78,142 @@ val_transforms = transforms.Compose([
     transforms.ToTensor(),
     transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
 ])
+# Params
+params = Params()
+# Defining directory
+train_dir = "HW2/archive/train"
+val_dir = "HW2/archive/val"
+
+train_dataset = datasets.ImageFolder(train_dir, transform=train_transforms)
+val_dataset = datasets.ImageFolder(val_dir, transform=val_transforms)
+
+train_loader = DataLoader(train_dataset, batch_size=params.batch_size, shuffle=True, num_workers=params.workers,pin_memory=True)
+val_loader = DataLoader(val_dataset, batch_size=params.batch_size, shuffle=False, num_workers=params.workers,pin_memory=True)
+
+model = models.resnet18(pretrained=True)
+print(model.fc)
+model.fc = nn.Linear(512, 10)
+print(model.fc)
+model = model.to(device)
+
+def freeze_backbone(model):
+    """
+    Freeze all layers EXCEPT the final fc layer (head)
+    """
+    # TODO: Loop through model parameters
+    # For all layers except fc, set requires_grad = False
+    for params in model.parameters():
+        params.requires_grad = False
+    for params in model.fc.parameters():
+        params.requires_grad = True
+    return model
+
+def unfreeze_all(model):
+    """
+    Unfreeze all layers
+    """
+    for params in model.parameters():
+        params.requires_grad = True
+    return model
+
+
+def train(dataloader, model, loss_fn, optimizer, epoch, writer):
+    size = len(dataloader.dataset)
+    model.train()
+    start0 = time.time()
+    start = time.time()
+    for batch, (X, y) in enumerate(dataloader):
+        X, y = X.to(device), y.to(device)
+
+        # Compute prediction error
+        pred = model(X)
+        loss = loss_fn(pred, y)
+
+        # Backpropagation
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+        batch_size = len(X)
+        if batch % 5 == 0:
+            loss, current = loss.item(), (batch + 1) * batch_size
+            print(f"loss: {loss:>7f}  [{current:>5d}/{size:>5d}], {(current/size * 100):>4f}%")
+            step = epoch * size + current
+            writer.add_scalar('training loss',
+                            loss,
+                            step)
+            new_start = time.time()
+            delta = new_start - start
+            start = new_start
+            if batch != 0:
+                print("Done in ", delta, " seconds")
+                remaining_steps = size - current
+                speed = batch_size / delta
+                remaining_time = remaining_steps / speed
+                print("Remaining time (seconds): ", remaining_time)
+        
+    print("Entire epoch done in ", time.time() - start0, " seconds")
+    
+    
+def validate(dataloader, model, loss_fn, epoch, writer):
+    size = len(dataloader.dataset)
+    num_batches = len(dataloader)
+    model.eval()
+    
+    val_loss, correct = 0, 0  
+    
+    with torch.no_grad():
+        for X, y in dataloader:
+            X, y = X.to(device), y.to(device)
+            pred = model(X)
+            val_loss += loss_fn(pred, y).item()
+            correct += (pred.argmax(1) == y).type(torch.float).sum().item()
+    
+    val_loss /= num_batches
+    accuracy = 100 * correct / size
+    
+    # Log to TensorBoard
+    step = epoch * size
+    if writer is not None:
+        writer.add_scalar('validation_loss', val_loss, step)
+        writer.add_scalar('validation_accuracy', accuracy, step)
+    
+    print(f"Validation - Accuracy: {accuracy:>0.1f}%, Avg loss: {val_loss:>8f}\n")
+    
+    return accuracy
+
+
+if __name__ == '__main__':
+    # 1. Setup
+    loss_fn = nn.CrossEntropyLoss  # What loss function for classification?
+    
+    # 2. Create checkpoint directory
+    checkpoint_dir = params.name  # Use params.name
+    
+    # 3. TensorBoard writer
+    writer = SummaryWriter('runs/' + params.name)
+    
+    # ===== PHASE 1: Train head only =====
+    print("="*50)
+    print("PHASE 1: Training head only (frozen backbone)")
+    print("="*50)
+    
+    model = freeze_backbone(model)
+    optimizer = params.lr  # Use params.lr
+    
+    for epoch in range(params.epochs_phase1):
+        # Train
+        # Validate
+        # Save checkpoint
+    
+    # ===== PHASE 2: Fine-tune everything =====
+    print("="*50)
+    print("PHASE 2: Fine-tuning all layers")
+    print("="*50)
+    
+    model = unfreeze_all(model)
+    optimizer = params.lr_phase2  # Use params.lr_phase2 (lower!)
+    
+    for epoch in range(params.epochs_phase1, params.epochs_phase1 + params.epochs_phase2):
+        # Train
+        # Validate
+        # Save checkpoint
