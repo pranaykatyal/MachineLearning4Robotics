@@ -184,10 +184,11 @@ def validate(dataloader, model, loss_fn, epoch, writer):
 
 if __name__ == '__main__':
     # 1. Setup
-    loss_fn = nn.CrossEntropyLoss  # What loss function for classification?
+    loss_fn = nn.CrossEntropyLoss()  # What loss function for classification?
     
     # 2. Create checkpoint directory
-    checkpoint_dir = params.name  # Use params.name
+    checkpoint_dir = Path("checkpoints") / params.name  # Use params.name
+    checkpoint_dir.mkdir(parents=True, exist_ok=True) 
     
     # 3. TensorBoard writer
     writer = SummaryWriter('runs/' + params.name)
@@ -198,12 +199,26 @@ if __name__ == '__main__':
     print("="*50)
     
     model = freeze_backbone(model)
-    optimizer = params.lr  # Use params.lr
+    optimizer = optim.SGD(model.parameters(), lr=params.lr, weight_decay=params.weight_decay, momentum=params.momentum)  # Use params.lr
     
     for epoch in range(params.epochs_phase1):
         # Train
+        train(train_loader,model,loss_fn,optimizer,epoch,writer)
+        
         # Validate
+        acc = validate(val_loader, model, loss_fn, epoch, writer)
+        
         # Save checkpoint
+        checkpoint = {
+            "model": model.state_dict(),        # model's state_dict
+            "optimizer":   optimizer.state_dict() , # optimizer's state_dict
+            "epoch": epoch,        # current epoch number
+            "accuracy": acc,     # what validate() returned
+            "params": params,        # params object
+        }
+
+        torch.save(checkpoint, checkpoint_dir / f"model_epoch_{epoch}.pth")
+        torch.save(checkpoint, checkpoint_dir / "checkpoint.pth")  # Also save as latest
     
     # ===== PHASE 2: Fine-tune everything =====
     print("="*50)
@@ -211,9 +226,22 @@ if __name__ == '__main__':
     print("="*50)
     
     model = unfreeze_all(model)
-    optimizer = params.lr_phase2  # Use params.lr_phase2 (lower!)
+    optimizer = optim.SGD(model.parameters(), lr=params.lr_phase2, weight_decay=params.weight_decay, momentum=params.momentum)   # Use params.lr_phase2 (lower!)
     
     for epoch in range(params.epochs_phase1, params.epochs_phase1 + params.epochs_phase2):
         # Train
+        train(train_loader,model,loss_fn,optimizer,epoch,writer)
         # Validate
+        acc = validate(val_loader, model, loss_fn, epoch, writer)
         # Save checkpoint
+                # Save checkpoint
+        checkpoint = {
+            "model": model.state_dict(),        # model's state_dict
+            "optimizer":   optimizer.state_dict() , # optimizer's state_dict
+            "epoch": epoch,        # current epoch number
+            "accuracy": acc,     # what validate() returned
+            "params": params,        # params object
+        }
+
+        torch.save(checkpoint, checkpoint_dir / f"model_epoch_{epoch}.pth")
+        torch.save(checkpoint, checkpoint_dir / "checkpoint.pth")  # Also save as latest
