@@ -81,8 +81,8 @@ val_transforms = transforms.Compose([
 # Params
 params = Params()
 # Defining directory
-train_dir = "HW2/archive/train"
-val_dir = "HW2/archive/val"
+train_dir = "archive/train"
+val_dir = "archive/val"
 
 train_dataset = datasets.ImageFolder(train_dir, transform=train_transforms)
 val_dataset = datasets.ImageFolder(val_dir, transform=val_transforms)
