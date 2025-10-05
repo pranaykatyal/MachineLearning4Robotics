@@ -74,6 +74,8 @@ requirements.txt
 *.tiff
 *.tif
 *.webp
+# Ignore zip files
+*.zip
 
 # Video files
 *.mp4
