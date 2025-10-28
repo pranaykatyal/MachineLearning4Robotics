@@ -98,3 +98,6 @@ requirements.txt
 # Dataset and model cache
 data/
 models/
+
+# Ignore vector cache folder used by some embedding libraries
+.vector_cache/
