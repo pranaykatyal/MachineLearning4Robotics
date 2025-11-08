@@ -14,6 +14,7 @@ dtype = torch.float32
 
 BATCH_SIZE = 32
 LR = 1e-3
+WEIGHT_DECAY = 1e-8  
 NUM_EPOCHS = 10
 
 turn_radius = 50
@@ -23,7 +24,7 @@ climb_angle_range = 30
 climb_angle_incrmement = 5
 grid_margin = 5
 grid_size = 2 * turn_radius * grid_margin
-grid_resolution = 50
+grid_resolution = 10
 
 # ===============================
 # Dataset Generation
@@ -95,7 +96,8 @@ def train_rnn(dataset):
             return out
 
     model = DubinsRNN().to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=LR)
+
+    optimizer = torch.optim.Adam(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
     criterion = nn.MSELoss()
 
     best_val_loss = float('inf')
@@ -237,10 +239,10 @@ for i, idx in enumerate(subset_indices, start=1):
     inputs_np = inputs.cpu().numpy()
     targets_np = targets.cpu().numpy()
 
-    # Trim only the padded portion at the end (avoid zero-length sequences)
+
     num_valid_points = (targets_np != 0).any(axis=1).sum()
     if num_valid_points == 0:
-        continue  # skip completely empty sequences
+        continue 
     inputs_np = inputs_np[:num_valid_points]
     targets_np = targets_np[:num_valid_points]
 
