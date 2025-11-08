@@ -3,7 +3,6 @@ from dubinEHF3d import dubinEHF3d
 import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset, random_split
 import matplotlib.pyplot as plt
-from mpl_toolkits.mplot3d import Axes3D
 from torch.nn.utils.rnn import pad_sequence
 import os
 
@@ -66,9 +65,7 @@ def train_rnn(dataset):
     all_targets = pad_sequence(train_targets, batch_first=True)
     full_dataset = TensorDataset(all_inputs, all_targets)
 
-    # ===============================
     # Split dataset: 80% train, 10% val, 10% test
-    # ===============================
     total_size = len(full_dataset)
     train_size = int(0.8 * total_size)
     val_size = int(0.1 * total_size)
@@ -102,11 +99,10 @@ def train_rnn(dataset):
     criterion = nn.MSELoss()
 
     best_val_loss = float('inf')
-    train_losses, val_losses = [], []
+    train_losses = []
+    val_losses = []
 
-    # ===============================
     # Training Loop
-    # ===============================
     for epoch in range(NUM_EPOCHS):
         model.train()
         epoch_loss = 0.0
@@ -143,9 +139,7 @@ def train_rnn(dataset):
         avg_train_loss = epoch_loss / total_batches
         train_losses.append(avg_train_loss)
 
-        # -------------------------------
         # Validation
-        # -------------------------------
         model.eval()
         val_loss = 0.0
         with torch.no_grad():
@@ -165,9 +159,7 @@ def train_rnn(dataset):
 
         print(f"Epoch [{epoch+1}/{NUM_EPOCHS}]  Train Loss: {avg_train_loss:.6f}  Val Loss: {avg_val_loss:.6f}")
 
-    # ===============================
     # Final Test Evaluation
-    # ===============================
     print("\nEvaluating on Test Set...")
     model.load_state_dict(torch.load("./best_dubins_rnn.pth"))
     model.eval()
@@ -181,9 +173,7 @@ def train_rnn(dataset):
     avg_test_loss = test_loss / len(test_loader)
     print(f"\nFinal Test Loss: {avg_test_loss:.6f}")
 
-    # ===============================
-    # Plot loss curves (and save)
-    # ===============================
+    # Plot loss curves
     plt.figure()
     plt.plot(train_losses, label="Train Loss")
     plt.plot(val_losses, label="Validation Loss")
@@ -230,24 +220,7 @@ def predict_trajectory(model, start_pos, num_steps=50):
 
 
 # ===============================
-# Plot Predicted Trajectory (and save)
-# ===============================
-start = [0.0, 0.0, 0.0]
-predicted_traj = predict_trajectory(model, start, num_steps=100)
-
-fig = plt.figure()
-ax = fig.add_subplot(111, projection='3d')
-ax.plot(predicted_traj[:, 0], predicted_traj[:, 1], predicted_traj[:, 2])
-ax.set_xlabel('East')
-ax.set_ylabel('North')
-ax.set_zlabel('Altitude')
-plt.title("Predicted Trajectory")
-plt.savefig("predicted_trajectory.png", dpi=300, bbox_inches="tight")
-plt.show()
-
-
-# ===============================
-# Plot 10 test set paths (without padding)
+# Plot Test Set Paths with Ground Truth
 # ===============================
 save_dir = "plots/test_paths"
 os.makedirs(save_dir, exist_ok=True)
@@ -255,31 +228,42 @@ os.makedirs(save_dir, exist_ok=True)
 num_samples_to_plot = 10
 subset_indices = range(min(num_samples_to_plot, len(test_dataset)))
 
-print(f"\nSaving {len(subset_indices)} test paths to '{save_dir}'...")
+print(f"\nSaving {len(subset_indices)} test paths with predictions and ground truth to '{save_dir}'...")
 
 for i, idx in enumerate(subset_indices, start=1):
     inputs, targets = test_dataset[idx]
 
-    # Convert to numpy for plotting
-    path_np = inputs.cpu().numpy()
+    # Convert to numpy
+    inputs_np = inputs.cpu().numpy()
+    targets_np = targets.cpu().numpy()
 
-    # Remove padded zeros (detect where padding starts)
-    valid_mask = ~(path_np == 0).all(axis=1)
-    path_np = path_np[valid_mask]
+    # Trim only the padded portion at the end (avoid zero-length sequences)
+    num_valid_points = (targets_np != 0).any(axis=1).sum()
+    if num_valid_points == 0:
+        continue  # skip completely empty sequences
+    inputs_np = inputs_np[:num_valid_points]
+    targets_np = targets_np[:num_valid_points]
 
-    # Plot the 3D path
+    # Predict
+    model.eval()
+    with torch.no_grad():
+        inp_tensor = torch.tensor(inputs_np, dtype=dtype).unsqueeze(0).to(device)
+        pred_np = model(inp_tensor).squeeze(0).cpu().numpy()
+        pred_np = pred_np[:len(targets_np)]
+
+    # Plot
     fig = plt.figure()
     ax = fig.add_subplot(111, projection='3d')
-    ax.plot(path_np[:, 0], path_np[:, 1], path_np[:, 2], label=f"Path {i}")
+    ax.plot(targets_np[:, 0], targets_np[:, 1], targets_np[:, 2], 'g-', label='Ground Truth')
+    ax.plot(pred_np[:, 0], pred_np[:, 1], pred_np[:, 2], 'r--', label='Model Prediction')
     ax.set_xlabel('East')
     ax.set_ylabel('North')
     ax.set_zlabel('Altitude')
     ax.set_title(f"Test Path {i}")
-    plt.legend()
+    ax.legend()
 
-    # Save the figure
     path_file = os.path.join(save_dir, f"test_path_{i}.png")
     plt.savefig(path_file, dpi=300, bbox_inches="tight")
     plt.close(fig)
 
-print("✅ Test paths saved successfully.")
+print("✅ Test paths with ground truth and predictions saved successfully.")
