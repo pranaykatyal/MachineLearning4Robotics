@@ -5,6 +5,7 @@ from torch.utils.data import DataLoader, TensorDataset, random_split
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
 from torch.nn.utils.rnn import pad_sequence
+import os
 
 # ===============================
 # Configuration
@@ -193,7 +194,8 @@ def train_rnn(dataset):
     plt.savefig("training_validation_loss.png", dpi=300, bbox_inches="tight")
     plt.show()
 
-    return model
+    return model, test_dataset
+
 
 # ===============================
 # Main Execution
@@ -203,12 +205,13 @@ dataset = generate_dataset()
 print(f"Dataset generated with {len(dataset)} samples")
 
 print("\nStarting training...")
-model = train_rnn(dataset)
+model, test_dataset = train_rnn(dataset)
 print("\nTraining completed!")
 
 print("Saving model...")
 torch.save(model.state_dict(), "./dubins_rnn_final.pth")
 print("Model saved to 'dubins_rnn_final.pth'")
+
 
 # ===============================
 # Prediction Function
@@ -225,6 +228,7 @@ def predict_trajectory(model, start_pos, num_steps=50):
             trajectory.append(pos)
     return torch.stack(trajectory).cpu().numpy()
 
+
 # ===============================
 # Plot Predicted Trajectory (and save)
 # ===============================
@@ -240,3 +244,42 @@ ax.set_zlabel('Altitude')
 plt.title("Predicted Trajectory")
 plt.savefig("predicted_trajectory.png", dpi=300, bbox_inches="tight")
 plt.show()
+
+
+# ===============================
+# Plot 10 test set paths (without padding)
+# ===============================
+save_dir = "plots/test_paths"
+os.makedirs(save_dir, exist_ok=True)
+
+num_samples_to_plot = 10
+subset_indices = range(min(num_samples_to_plot, len(test_dataset)))
+
+print(f"\nSaving {len(subset_indices)} test paths to '{save_dir}'...")
+
+for i, idx in enumerate(subset_indices, start=1):
+    inputs, targets = test_dataset[idx]
+
+    # Convert to numpy for plotting
+    path_np = inputs.cpu().numpy()
+
+    # Remove padded zeros (detect where padding starts)
+    valid_mask = ~(path_np == 0).all(axis=1)
+    path_np = path_np[valid_mask]
+
+    # Plot the 3D path
+    fig = plt.figure()
+    ax = fig.add_subplot(111, projection='3d')
+    ax.plot(path_np[:, 0], path_np[:, 1], path_np[:, 2], label=f"Path {i}")
+    ax.set_xlabel('East')
+    ax.set_ylabel('North')
+    ax.set_zlabel('Altitude')
+    ax.set_title(f"Test Path {i}")
+    plt.legend()
+
+    # Save the figure
+    path_file = os.path.join(save_dir, f"test_path_{i}.png")
+    plt.savefig(path_file, dpi=300, bbox_inches="tight")
+    plt.close(fig)
+
+print("✅ Test paths saved successfully.")
