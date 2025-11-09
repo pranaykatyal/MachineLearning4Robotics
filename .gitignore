@@ -101,3 +101,8 @@ models/
 
 # Ignore vector cache folder used by some embedding libraries
 .vector_cache/
+
+*.err
+*.out
+*.sh
+
