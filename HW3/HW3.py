@@ -4,6 +4,7 @@ import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset, random_split
 import matplotlib.pyplot as plt
 from torch.nn.utils.rnn import pad_sequence
+import numpy as np
 import os
 
 # ===============================
@@ -12,10 +13,10 @@ import os
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 dtype = torch.float32
 
-BATCH_SIZE = 32
+BATCH_SIZE = 64
 LR = 1e-3
-WEIGHT_DECAY = 1e-10  
-NUM_EPOCHS = 20
+WEIGHT_DECAY = 1e-3
+NUM_EPOCHS = 12
 
 turn_radius = 60
 path_step_size = 10
@@ -26,7 +27,8 @@ climb_angle_incrmement = 5
 
 grid_margin = 5
 grid_size = 2 * turn_radius * grid_margin
-grid_resolution = 10
+grid_resolution = 30
+
 
 # ===============================
 # Dataset Generation
@@ -34,10 +36,10 @@ grid_resolution = 10
 def generate_dataset():
     dataset = []
     data_count = 0
-    for climb_angle in range(-climb_angle_range, climb_angle_range, climb_angle_incrmement): 
+    for climb_angle in range(-climb_angle_range, climb_angle_range, climb_angle_incrmement):
         for start_heading in range(0, 360, heading_increment):
-            for x_spot in range(-grid_size//2, grid_size//2, grid_resolution):
-                for y_spot in range(-grid_size//2, grid_size//2, grid_resolution):
+            for x_spot in range(-grid_size // 2, grid_size // 2, grid_resolution):
+                for y_spot in range(-grid_size // 2, grid_size // 2, grid_resolution):
                     data_count += 1
                     path, end_heading, num_points = dubinEHF3d(
                         0, 0, 0,
@@ -46,8 +48,45 @@ def generate_dataset():
                         turn_radius, path_step_size,
                         climb_angle * (torch.pi / 180), data_count
                     )
+                    if path is None or len(path) == 0:
+                        continue
                     dataset.append((path, end_heading, num_points))
     return dataset
+
+
+# ===============================
+# Normalization Utilities
+# ===============================
+def compute_normalization_params(paths):
+    all_points = torch.cat(paths, dim=0)
+    mean = all_points.mean(dim=0)
+    std = all_points.std(dim=0) + 1e-8
+    return mean, std
+
+
+def normalize_paths(paths, mean, std):
+    return [(p - mean) / std for p in paths]
+
+
+def denormalize_paths(paths, mean, std):
+    return [(p * std) + mean for p in paths]
+
+
+# ===============================
+# Padding Utility
+# ===============================
+def pad_with_last(seq_list):
+    """Pad each path by extending the last value instead of zero-padding."""
+    max_len = max(len(seq) for seq in seq_list)
+    padded = []
+    for seq in seq_list:
+        if len(seq) == 0:
+            continue
+        pad_len = max_len - len(seq)
+        last_val = seq[-1].unsqueeze(0).repeat(pad_len, 1)
+        padded_seq = torch.cat([seq, last_val], dim=0)
+        padded.append(padded_seq)
+    return padded
 
 
 # ===============================
@@ -59,17 +98,30 @@ def train_lstm(dataset):
 
     for path_tuple in dataset:
         path = torch.tensor(path_tuple[0], dtype=dtype)
+        if path.shape[0] < 2:
+            continue
         inputs = path[:-1]
         targets = path[1:]
         train_inputs.append(inputs)
         train_targets.append(targets)
 
-    # Pad sequences to make them same length
+    # ===============================
+    # Normalization
+    # ===============================
+    print("Computing normalization parameters...")
+    mean, std = compute_normalization_params(train_inputs + train_targets)
+    train_inputs = normalize_paths(train_inputs, mean, std)
+    train_targets = normalize_paths(train_targets, mean, std)
+
+    # Pad sequences (using last value)
+    train_inputs = pad_with_last(train_inputs)
+    train_targets = pad_with_last(train_targets)
+
     all_inputs = pad_sequence(train_inputs, batch_first=True)
     all_targets = pad_sequence(train_targets, batch_first=True)
+
     full_dataset = TensorDataset(all_inputs, all_targets)
 
-    # Split dataset: 80% train, 10% val, 10% test
     total_size = len(full_dataset)
     train_size = int(0.8 * total_size)
     val_size = int(0.1 * total_size)
@@ -79,7 +131,6 @@ def train_lstm(dataset):
         full_dataset, [train_size, val_size, test_size]
     )
 
-    # DataLoaders
     train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
     val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False)
     test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False)
@@ -88,7 +139,7 @@ def train_lstm(dataset):
     # Model Definition (LSTM)
     # ===============================
     class DubinsLSTM(nn.Module):
-        def __init__(self, input_dim=3, hidden_dim=64, num_layers=5, output_dim=3, dropout=0.2):
+        def __init__(self, input_dim=3, hidden_dim=64, num_layers=3, output_dim=3, dropout=0.2):
             super().__init__()
             self.lstm = nn.LSTM(
                 input_dim,
@@ -106,7 +157,7 @@ def train_lstm(dataset):
 
     model = DubinsLSTM().to(device)
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
     criterion = nn.MSELoss()
 
     best_val_loss = float('inf')
@@ -143,16 +194,15 @@ def train_lstm(dataset):
                 print(f"Running Avg Loss: {running_loss:.6f}")
 
                 with torch.no_grad():
-                    sample_pred = preds[0].cpu().numpy()
-                    sample_target = batch_out[0].cpu().numpy()
-                    print("\nSample Prediction vs Target (first point in batch):")
+                    sample_pred = preds[0].cpu() * std + mean
+                    sample_target = batch_out[0].cpu() * std + mean
+                    print("\nSample Prediction vs Target (denormalized, first point in batch):")
                     print(f"Pred:   (x={sample_pred[0][0]:.2f}, y={sample_pred[0][1]:.2f}, z={sample_pred[0][2]:.2f})")
                     print(f"Target: (x={sample_target[0][0]:.2f}, y={sample_target[0][1]:.2f}, z={sample_target[0][2]:.2f})")
 
         avg_train_loss = epoch_loss / total_batches
         train_losses.append(avg_train_loss)
 
-        # Validation
         model.eval()
         val_loss = 0.0
         with torch.no_grad():
@@ -172,9 +222,6 @@ def train_lstm(dataset):
 
         print(f"Epoch [{epoch+1}/{NUM_EPOCHS}]  Train Loss: {avg_train_loss:.6f}  Val Loss: {avg_val_loss:.6f}")
 
-    # ===============================
-    # Final Test Evaluation
-    # ===============================
     print("\nEvaluating on Test Set...")
     model.load_state_dict(torch.load("./best_dubins_lstm.pth"))
     model.eval()
@@ -188,7 +235,6 @@ def train_lstm(dataset):
     avg_test_loss = test_loss / len(test_loader)
     print(f"\nFinal Test Loss: {avg_test_loss:.6f}")
 
-    # Plot loss curves
     plt.figure()
     plt.plot(train_losses, label="Train Loss")
     plt.plot(val_losses, label="Validation Loss")
@@ -199,7 +245,7 @@ def train_lstm(dataset):
     plt.savefig("training_validation_loss.png", dpi=300, bbox_inches="tight")
     plt.show()
 
-    return model, test_dataset
+    return model, test_dataset, mean, std
 
 
 # ===============================
@@ -210,28 +256,12 @@ dataset = generate_dataset()
 print(f"Dataset generated with {len(dataset)} samples")
 
 print("\nStarting training...")
-model, test_dataset = train_lstm(dataset)
+model, test_dataset, mean, std = train_lstm(dataset)
 print("\nTraining completed!")
 
 print("Saving model...")
 torch.save(model.state_dict(), "./dubins_lstm_final.pth")
 print("Model saved to 'dubins_lstm_final.pth'")
-
-
-# ===============================
-# Prediction Function
-# ===============================
-def predict_trajectory(model, start_pos, num_steps=50):
-    model.eval()
-    trajectory = [torch.tensor(start_pos, dtype=dtype).to(device)]
-    with torch.no_grad():
-        pos = trajectory[0]
-        for _ in range(num_steps):
-            inp = pos.unsqueeze(0).unsqueeze(0)
-            next_pos = model(inp)
-            pos = next_pos.squeeze(0).squeeze(0)
-            trajectory.append(pos)
-    return torch.stack(trajectory).cpu().numpy()
 
 
 # ===============================
@@ -251,17 +281,37 @@ for i, idx in enumerate(subset_indices, start=1):
     inputs_np = inputs.cpu().numpy()
     targets_np = targets.cpu().numpy()
 
-    num_valid_points = (targets_np != 0).any(axis=1).sum()
-    if num_valid_points == 0:
-        continue 
-    inputs_np = inputs_np[:num_valid_points]
-    targets_np = targets_np[:num_valid_points]
+    # Detect when padding starts (points stop changing)
+    diffs = np.diff(targets_np, axis=0)
+    stopped = np.all(np.isclose(diffs, 0, atol=1e-6), axis=1)
+    if np.any(stopped):
+        stop_idx = np.argmax(stopped)
+        targets_np = targets_np[:stop_idx + 1]
+        inputs_np = inputs_np[:stop_idx + 1]
 
     model.eval()
     with torch.no_grad():
         inp_tensor = torch.tensor(inputs_np, dtype=dtype).unsqueeze(0).to(device)
         pred_np = model(inp_tensor).squeeze(0).cpu().numpy()
-        pred_np = pred_np[:len(targets_np)]
+
+    # Match ground truth length
+    valid_len = len(targets_np)
+    pred_np = pred_np[:valid_len]
+
+    # Denormalize both
+    pred_np = (pred_np * std.cpu().numpy()) + mean.cpu().numpy()
+    targets_np = (targets_np * std.cpu().numpy()) + mean.cpu().numpy()
+
+    # Re-run padding stop check on both to ensure no trailing flat region
+    for arr_name, arr in [("pred", pred_np), ("target", targets_np)]:
+        diffs = np.diff(arr, axis=0)
+        stopped = np.all(np.isclose(diffs, 0, atol=1e-6), axis=1)
+        if np.any(stopped):
+            stop_idx = np.argmax(stopped)
+            if arr_name == "pred":
+                pred_np = arr[:stop_idx + 1]
+            else:
+                targets_np = arr[:stop_idx + 1]
 
     fig = plt.figure()
     ax = fig.add_subplot(111, projection='3d')
