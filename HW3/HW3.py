@@ -14,14 +14,16 @@ dtype = torch.float32
 
 BATCH_SIZE = 32
 LR = 1e-3
-WEIGHT_DECAY = 1e-8  
-NUM_EPOCHS = 10
+WEIGHT_DECAY = 1e-10  
+NUM_EPOCHS = 20
 
-turn_radius = 50
+turn_radius = 60
 path_step_size = 10
+
 heading_increment = 10
 climb_angle_range = 30
 climb_angle_incrmement = 5
+
 grid_margin = 5
 grid_size = 2 * turn_radius * grid_margin
 grid_resolution = 10
@@ -47,17 +49,18 @@ def generate_dataset():
                     dataset.append((path, end_heading, num_points))
     return dataset
 
+
 # ===============================
 # Training Function
 # ===============================
-def train_rnn(dataset):
+def train_lstm(dataset):
     train_inputs = []
     train_targets = []
 
     for path_tuple in dataset:
-        path = torch.tensor(path_tuple[0], dtype=dtype)  
-        inputs = path[:-1] 
-        targets = path[1:] 
+        path = torch.tensor(path_tuple[0], dtype=dtype)
+        inputs = path[:-1]
+        targets = path[1:]
         train_inputs.append(inputs)
         train_targets.append(targets)
 
@@ -82,20 +85,26 @@ def train_rnn(dataset):
     test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False)
 
     # ===============================
-    # Model Definition
+    # Model Definition (LSTM)
     # ===============================
-    class DubinsRNN(nn.Module):
-        def __init__(self, input_dim=3, hidden_dim=64, output_dim=3):
+    class DubinsLSTM(nn.Module):
+        def __init__(self, input_dim=3, hidden_dim=64, num_layers=5, output_dim=3, dropout=0.2):
             super().__init__()
-            self.rnn = nn.RNN(input_dim, hidden_dim, batch_first=True)
+            self.lstm = nn.LSTM(
+                input_dim,
+                hidden_dim,
+                num_layers=num_layers,
+                batch_first=True,
+                dropout=dropout
+            )
             self.fc = nn.Linear(hidden_dim, output_dim)
 
         def forward(self, x):
-            out, _ = self.rnn(x)
+            out, _ = self.lstm(x)
             out = self.fc(out)
             return out
 
-    model = DubinsRNN().to(device)
+    model = DubinsLSTM().to(device)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
     criterion = nn.MSELoss()
@@ -104,7 +113,9 @@ def train_rnn(dataset):
     train_losses = []
     val_losses = []
 
+    # ===============================
     # Training Loop
+    # ===============================
     for epoch in range(NUM_EPOCHS):
         model.train()
         epoch_loss = 0.0
@@ -156,14 +167,16 @@ def train_rnn(dataset):
 
         if avg_val_loss < best_val_loss:
             best_val_loss = avg_val_loss
-            torch.save(model.state_dict(), "./best_dubins_rnn.pth")
+            torch.save(model.state_dict(), "./best_dubins_lstm.pth")
             print(f"\n★ Epoch {epoch+1}: New best validation loss {best_val_loss:.6f}")
 
         print(f"Epoch [{epoch+1}/{NUM_EPOCHS}]  Train Loss: {avg_train_loss:.6f}  Val Loss: {avg_val_loss:.6f}")
 
+    # ===============================
     # Final Test Evaluation
+    # ===============================
     print("\nEvaluating on Test Set...")
-    model.load_state_dict(torch.load("./best_dubins_rnn.pth"))
+    model.load_state_dict(torch.load("./best_dubins_lstm.pth"))
     model.eval()
     test_loss = 0.0
     with torch.no_grad():
@@ -197,12 +210,12 @@ dataset = generate_dataset()
 print(f"Dataset generated with {len(dataset)} samples")
 
 print("\nStarting training...")
-model, test_dataset = train_rnn(dataset)
+model, test_dataset = train_lstm(dataset)
 print("\nTraining completed!")
 
 print("Saving model...")
-torch.save(model.state_dict(), "./dubins_rnn_final.pth")
-print("Model saved to 'dubins_rnn_final.pth'")
+torch.save(model.state_dict(), "./dubins_lstm_final.pth")
+print("Model saved to 'dubins_lstm_final.pth'")
 
 
 # ===============================
@@ -235,10 +248,8 @@ print(f"\nSaving {len(subset_indices)} test paths with predictions and ground tr
 for i, idx in enumerate(subset_indices, start=1):
     inputs, targets = test_dataset[idx]
 
-    # Convert to numpy
     inputs_np = inputs.cpu().numpy()
     targets_np = targets.cpu().numpy()
-
 
     num_valid_points = (targets_np != 0).any(axis=1).sum()
     if num_valid_points == 0:
@@ -246,14 +257,12 @@ for i, idx in enumerate(subset_indices, start=1):
     inputs_np = inputs_np[:num_valid_points]
     targets_np = targets_np[:num_valid_points]
 
-    # Predict
     model.eval()
     with torch.no_grad():
         inp_tensor = torch.tensor(inputs_np, dtype=dtype).unsqueeze(0).to(device)
         pred_np = model(inp_tensor).squeeze(0).cpu().numpy()
         pred_np = pred_np[:len(targets_np)]
 
-    # Plot
     fig = plt.figure()
     ax = fig.add_subplot(111, projection='3d')
     ax.plot(targets_np[:, 0], targets_np[:, 1], targets_np[:, 2], 'g-', label='Ground Truth')
