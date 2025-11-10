@@ -1,11 +1,9 @@
-
 import torch
 from dubinEHF3d import dubinEHF3d
 import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset, random_split
 import matplotlib.pyplot as plt
 import os
-from torch.utils.tensorboard import SummaryWriter
 
 # ===============================
 # Configuration
@@ -140,7 +138,7 @@ def train_lstm(dataset):
     # Model Definition
     # ===============================
     class DubinsLSTM(nn.Module):
-        def __init__(self, input_dim=3, hidden_dim=64, num_layers=2, output_dim=3, dropout=0.2):
+        def __init__(self, input_dim=3, hidden_dim=64, num_layers=3, output_dim=3, dropout=0.2):
             super().__init__()
             self.lstm = nn.LSTM(input_dim, hidden_dim, num_layers=num_layers,
                                 batch_first=True, dropout=dropout)
@@ -156,8 +154,7 @@ def train_lstm(dataset):
     criterion = nn.MSELoss()
 
     best_val_loss = float('inf')
-    train_losses = []
-    val_losses = []
+    train_losses, val_losses = [], []
 
     # ===============================
     # Training Loop (original print style preserved)
@@ -210,10 +207,6 @@ def train_lstm(dataset):
         avg_val_loss = val_loss / len(val_loader)
         val_losses.append(avg_val_loss)
 
-        # TensorBoard logging
-        writer.add_scalar("Loss/Train", avg_train_loss, epoch)
-        writer.add_scalar("Loss/Validation", avg_val_loss, epoch)
-
         if avg_val_loss < best_val_loss:
             best_val_loss = avg_val_loss
             torch.save(model.state_dict(), "./best_dubins_lstm.pth")
@@ -221,6 +214,9 @@ def train_lstm(dataset):
 
         print(f"Epoch [{epoch+1}/{NUM_EPOCHS}]  Train Loss: {avg_train_loss:.6f}  Val Loss: {avg_val_loss:.6f}")
 
+    # ===============================
+    # Final Test
+    # ===============================
     print("\nEvaluating on Test Set...")
     model.load_state_dict(torch.load("./best_dubins_lstm.pth"))
     model.eval()
