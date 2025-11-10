@@ -4,6 +4,7 @@ import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset, random_split
 import matplotlib.pyplot as plt
 import os
+from torch.utils.tensorboard import SummaryWriter
 
 # ===============================
 # Configuration
@@ -156,6 +157,9 @@ def train_lstm(dataset):
     best_val_loss = float('inf')
     train_losses, val_losses = [], []
 
+    # TensorBoard writer
+    writer = SummaryWriter("runs/dubins_lstm_hw3")
+
     # ===============================
     # Training Loop (original print style preserved)
     # ===============================
@@ -207,6 +211,10 @@ def train_lstm(dataset):
         avg_val_loss = val_loss / len(val_loader)
         val_losses.append(avg_val_loss)
 
+        # TensorBoard logging
+        writer.add_scalar("Loss/train", avg_train_loss, epoch)
+        writer.add_scalar("Loss/val", avg_val_loss, epoch)
+
         if avg_val_loss < best_val_loss:
             best_val_loss = avg_val_loss
             torch.save(model.state_dict(), "./best_dubins_lstm.pth")
@@ -241,6 +249,7 @@ def train_lstm(dataset):
     plt.savefig("training_validation_loss.png", dpi=300, bbox_inches="tight")
     plt.show()
 
+    writer.close()
     return model, test_dataset, mean, std
 
 

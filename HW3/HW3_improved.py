@@ -92,31 +92,34 @@ def generate_dataset():
                         })
     print(f"\n✓ Generated {len(dataset)} valid trajectories")
     print("="*60)
-    # Save to Data.mat
+    # Save to Data.mat (efficiently)
     print("Saving dataset to Data.mat ...")
-    # Convert to arrays for .mat
-    trajectories = [d['trajectory'] for d in dataset]
-    metadatas = [d['metadata'] for d in dataset]
-    num_points = [d['num_points'] for d in dataset]
-    savemat('Data.mat', {
-        'trajectories': np.array(trajectories, dtype=object),
-        'metadatas': np.array(metadatas),
-        'num_points': np.array(num_points)
-    })
+    # Save as lists of arrays to avoid object dtype
+    trajectories = [d['trajectory'].astype(np.float32) for d in dataset]
+    metadatas = [d['metadata'].astype(np.float32) for d in dataset]
+    num_points = np.array([d['num_points'] for d in dataset], dtype=np.int32)
+    # Save each trajectory as a separate variable
+    mat_dict = {
+        'num_samples': len(trajectories),
+        'num_points': num_points,
+    }
+    for i, (traj, meta) in enumerate(zip(trajectories, metadatas)):
+        mat_dict[f'traj_{i}'] = traj
+        mat_dict[f'meta_{i}'] = meta
+    savemat('Data.mat', mat_dict)
     print("✓ Saved Data.mat")
     return dataset
 
 def load_dataset_from_mat(mat_path='Data.mat'):
-    """Load dataset from Data.mat file."""
+    """Load dataset from Data.mat file (efficiently)."""
     print(f"Loading dataset from {mat_path} ...")
     mat = loadmat(mat_path)
-    trajectories = mat['trajectories']
-    metadatas = mat['metadatas']
+    num_samples = int(mat['num_samples'][0][0])
     num_points = mat['num_points'].flatten()
     dataset = []
-    for i in range(len(num_points)):
-        traj = np.array(trajectories[i])
-        meta = np.array(metadatas[i])
+    for i in range(num_samples):
+        traj = mat[f'traj_{i}']
+        meta = mat[f'meta_{i}'].flatten()
         npts = int(num_points[i])
         dataset.append({
             'trajectory': traj,
