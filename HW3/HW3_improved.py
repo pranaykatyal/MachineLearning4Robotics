@@ -1,617 +1,306 @@
 import torch
+from dubinEHF3d import dubinEHF3d
 import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset, random_split
-from torch.utils.tensorboard import SummaryWriter
 import matplotlib.pyplot as plt
+from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
 import numpy as np
 import os
-from datetime import datetime
-from dubinEHF3d import dubinEHF3d
-from scipy.io import savemat, loadmat  # <-- Added for .mat support
+from torch.utils.tensorboard import SummaryWriter
 
-# ===============================
-# Configuration
-# ===============================
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print(f"Using device: {device}")
-if torch.cuda.is_available():
-    print(f"GPU: {torch.cuda.get_device_name(0)}")
-
 dtype = torch.float32
 
-# Hyperparameters (tuned for local GPU)
-BATCH_SIZE = 32
+BATCH_SIZE = 64
 LR = 1e-3
-WEIGHT_DECAY = 1e-5
-NUM_EPOCHS = 50  # Reduced for faster local testing
-HIDDEN_DIM = 64
-NUM_LAYERS = 2
-DROPOUT = 0.2
+WEIGHT_DECAY = 1e-3
+NUM_EPOCHS = 15
 
-# Dataset generation (reduced for faster testing)
-TURN_RADIUS = 50
-PATH_STEP_SIZE = 10
-HEADING_INCREMENT = 10  # Coarser: 0°, 20°, 40°, ..., 340° (18 values)
-CLIMB_ANGLE_RANGE = 30
-CLIMB_ANGLE_INCREMENT = 5  # Coarser: -30°, -20°, -10°, 0°, 10°, 20°, 30° (7 values)
-GRID_MARGIN = 5
-GRID_SIZE = 2 * TURN_RADIUS * GRID_MARGIN
-GRID_RESOLUTION = 5  # Coarser grid for faster generation
+turn_radius = 60
+path_step_size = 10
 
-MAX_SEQ_LENGTH = 50
+heading_increment = 10
+climb_angle_range = 30
+climb_angle_incrmement = 5
 
-# ===============================
-# Dataset Generation
-# ===============================
+grid_margin = 5
+grid_size = 2 * turn_radius * grid_margin
+grid_resolution = 30
+
 def generate_dataset():
-    """Generate Dubins trajectory dataset with metadata."""
     dataset = []
     data_count = 0
-    
-    print("\n" + "="*60)
-    print("GENERATING DATASET")
-    print("="*60)
-    
-    for climb_angle_deg in range(-CLIMB_ANGLE_RANGE, CLIMB_ANGLE_RANGE + 1, CLIMB_ANGLE_INCREMENT):
-        climb_angle = climb_angle_deg * (np.pi / 180)
-        
-        for start_heading_deg in range(0, 360, HEADING_INCREMENT):
-            start_heading = start_heading_deg * (np.pi / 180)
-            
-            for x_goal in range(-GRID_SIZE//2, GRID_SIZE//2 + 1, GRID_RESOLUTION):
-                for y_goal in range(-GRID_SIZE//2, GRID_SIZE//2 + 1, GRID_RESOLUTION):
-                    # Skip origin
-                    if x_goal == 0 and y_goal == 0:
-                        continue
-                    
+    min_seq_len = 5  # Minimum sequence length required to reach the goal
+    for climb_angle in range(-climb_angle_range, climb_angle_range, climb_angle_incrmement):
+        for start_heading in range(0, 360, heading_increment):
+            for x_spot in range(-grid_size // 2, grid_size // 2, grid_resolution):
+                for y_spot in range(-grid_size // 2, grid_size // 2, grid_resolution):
                     data_count += 1
                     path, end_heading, num_points = dubinEHF3d(
-                        0, 0, 0,  # Start position
-                        start_heading,
-                        x_goal, y_goal,
-                        TURN_RADIUS,
-                        PATH_STEP_SIZE,
-                        climb_angle,
-                        data_count
+                        0, 0, 0,
+                        start_heading * (torch.pi / 180),
+                        x_spot, y_spot,
+                        turn_radius, path_step_size,
+                        climb_angle * (torch.pi / 180), data_count
                     )
-                    
-                    # Only keep valid paths
-                    if num_points > 0:
-                        trajectory = path[:num_points]
-                        final_pos = trajectory[-1]
-                        metadata = np.array([
-                            0, 0, 0,
-                            final_pos[0], final_pos[1], final_pos[2],
-                            start_heading,
-                            climb_angle
-                        ])
-                        dataset.append({
-                            'trajectory': trajectory,
-                            'metadata': metadata,
-                            'num_points': num_points
-                        })
-    print(f"\n✓ Generated {len(dataset)} valid trajectories")
-    print("="*60)
-    # Save to Data.mat (efficiently)
-    print("Saving dataset to Data.mat ...")
-    # Save as lists of arrays to avoid object dtype
-    trajectories = [d['trajectory'].astype(np.float32) for d in dataset]
-    metadatas = [d['metadata'].astype(np.float32) for d in dataset]
-    num_points = np.array([d['num_points'] for d in dataset], dtype=np.int32)
-    # Save each trajectory as a separate variable
-    mat_dict = {
-        'num_samples': len(trajectories),
-        'num_points': num_points,
-    }
-    for i, (traj, meta) in enumerate(zip(trajectories, metadatas)):
-        mat_dict[f'traj_{i}'] = traj
-        mat_dict[f'meta_{i}'] = meta
-    savemat('Data.mat', mat_dict)
-    print("✓ Saved Data.mat")
+                    # Only keep paths with enough steps to reach the goal
+                    if path is None or len(path) < min_seq_len:
+                        continue
+                    actual_goal = path[-1]
+                    dataset.append((path, actual_goal, end_heading, num_points))
     return dataset
 
-def load_dataset_from_mat(mat_path='Data.mat'):
-    """Load dataset from Data.mat file (efficiently)."""
-    print(f"Loading dataset from {mat_path} ...")
-    mat = loadmat(mat_path)
-    num_samples = int(mat['num_samples'][0][0])
-    num_points = mat['num_points'].flatten()
-    dataset = []
-    for i in range(num_samples):
-        traj = mat[f'traj_{i}']
-        meta = mat[f'meta_{i}'].flatten()
-        npts = int(num_points[i])
-        dataset.append({
-            'trajectory': traj,
-            'metadata': meta,
-            'num_points': npts
-        })
-    print(f"✓ Loaded {len(dataset)} samples from {mat_path}")
-    return dataset
+def compute_normalization_params(paths):
+    all_points = torch.cat(paths, dim=0)
+    mean = all_points.mean(dim=0)
+    std = all_points.std(dim=0) + 1e-8
+    return mean, std
 
-# ===============================
-# LSTM Encoder-Decoder Model
-# ===============================
-class DubinsLSTM(nn.Module):
-    """LSTM Encoder-Decoder for Dubins trajectory prediction."""
-    
-    def __init__(self, input_dim=8, hidden_dim=128, output_dim=3, num_layers=2, dropout=0.2):
-        super().__init__()
-        self.hidden_dim = hidden_dim
-        self.num_layers = num_layers
-        self.output_dim = output_dim
-        
-        # Encoder: processes initial conditions
-        # Output must be 2 * (hidden_dim * num_layers) for h0 and c0
-        encoder_output_dim = 2 * hidden_dim * num_layers
-        self.encoder = nn.Sequential(
-            nn.Linear(input_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim, encoder_output_dim),
-            nn.ReLU()
-        )
-        
-        # Decoder LSTM
-        self.decoder_lstm = nn.LSTM(
-            input_size=output_dim,
-            hidden_size=hidden_dim,
-            num_layers=num_layers,
-            batch_first=True,
-            dropout=dropout if num_layers > 1 else 0
-        )
-        
-        # Output layer
-        self.fc_out = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim // 2),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim // 2, output_dim)
-        )
-    
-    def init_hidden(self, batch_size, encoded):
-        """Initialize LSTM hidden states from encoded features."""
-        hidden_size = self.hidden_dim * self.num_layers
-        h0 = encoded[:, :hidden_size].reshape(batch_size, self.num_layers, self.hidden_dim)
-        c0 = encoded[:, hidden_size:].reshape(batch_size, self.num_layers, self.hidden_dim)
-        
-        h0 = h0.transpose(0, 1).contiguous()
-        c0 = c0.transpose(0, 1).contiguous()
-        
-        return (h0, c0)
-    
-    def forward(self, metadata, target_seq_len, target_trajectory=None, teacher_forcing_ratio=0.5):
-        """
-        Forward pass with optional teacher forcing.
-        
-        Args:
-            metadata: (batch, 7) - initial conditions
-            target_seq_len: int - length of sequence to generate
-            target_trajectory: (batch, seq_len, 3) - ground truth for teacher forcing
-            teacher_forcing_ratio: probability of using teacher forcing
-        """
-        batch_size = metadata.shape[0]
-        
-        # Encode initial conditions
-        encoded = self.encoder(metadata)
-        hidden = self.init_hidden(batch_size, encoded)
-        
-        # Start from origin
-        decoder_input = torch.zeros(batch_size, 1, self.output_dim).to(metadata.device)
-        decoder_input[:, 0, :] = metadata[:, :3]  # Start position
-        
-        outputs = []
-        
-        for t in range(target_seq_len):
-            lstm_out, hidden = self.decoder_lstm(decoder_input, hidden)
-            prediction = self.fc_out(lstm_out)
-            outputs.append(prediction)
-            
-            # Teacher forcing
-            if target_trajectory is not None and np.random.random() < teacher_forcing_ratio:
-                decoder_input = target_trajectory[:, t:t+1, :]
-            else:
-                decoder_input = prediction
-        
-        return torch.cat(outputs, dim=1)
+def normalize_paths(paths, mean, std):
+    return [(p - mean) / std for p in paths]
 
-# ===============================
-# Training Function
-# ===============================
-def train_model(dataset):
-    """Train the LSTM model with TensorBoard logging."""
-    
-    # Setup TensorBoard
-    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    log_dir = f"runs/dubins_lstm_{timestamp}"
-    writer = SummaryWriter(log_dir)
-    
-    print(f"\n📊 TensorBoard logging to: {log_dir}")
-    print("   Run: tensorboard --logdir=runs --port=6006")
-    
-    # Prepare data
-    print("\n" + "="*60)
-    print("PREPARING DATA")
-    print("="*60)
-    
-    trajectories = []
-    metadatas = []
-    seq_lengths = []
-    
-    for sample in dataset:
-        traj = torch.tensor(sample['trajectory'], dtype=dtype)
-        meta = torch.tensor(sample['metadata'], dtype=dtype)
-        
-        # Pad or truncate
-        if len(traj) > MAX_SEQ_LENGTH:
-            traj = traj[:MAX_SEQ_LENGTH]
-            seq_len = MAX_SEQ_LENGTH
-        else:
-            padding = torch.zeros(MAX_SEQ_LENGTH - len(traj), 3)
-            traj = torch.cat([traj, padding], dim=0)
-            seq_len = sample['num_points']
-        
-        trajectories.append(traj)
-        metadatas.append(meta)
-        seq_lengths.append(seq_len)
-    
-    trajectories = torch.stack(trajectories)
-    metadatas = torch.stack(metadatas)
-    seq_lengths = torch.tensor(seq_lengths)
-    
-    # Create dataset
-    full_dataset = TensorDataset(metadatas, trajectories, seq_lengths)
-    
-    # Split: 80/10/10
-    total_size = len(full_dataset)
+def denormalize_paths(paths, mean, std):
+    return [(p * std) + mean for p in paths]
+
+def pad_with_last(seq_list):
+    max_len = max(len(seq) for seq in seq_list)
+    padded = []
+    lengths = []
+    for seq in seq_list:
+        lengths.append(len(seq))
+        if len(seq) == 0:
+            continue
+        pad_len = max_len - len(seq)
+        last_val = seq[-1].unsqueeze(0).repeat(pad_len, 1)
+        padded_seq = torch.cat([seq, last_val], dim=0)
+        padded.append(padded_seq)
+    return padded, lengths
+
+def train_lstm(dataset):
+    train_inputs = []
+    train_targets = []
+
+    for path_tuple in dataset:
+        path = torch.tensor(path_tuple[0], dtype=dtype)
+        goal = torch.tensor(path_tuple[1], dtype=dtype)  # Now actual endpoint
+        if path.shape[0] < 2:
+            continue
+        goal_seq = goal.unsqueeze(0).repeat(path.shape[0] - 1, 1)
+        inputs = torch.cat((path[:-1], goal_seq), dim=1)
+        targets = path[1:]
+        train_inputs.append(inputs)
+        train_targets.append(targets)
+
+    print("Computing normalization parameters...")
+    input_points = [inp[:, :3] for inp in train_inputs]
+    target_points = train_targets
+    mean, std = compute_normalization_params(input_points + target_points)
+
+    print(f"Normalization Mean: {mean}")
+    print(f"Normalization Std: {std}")
+
+    # Normalize only the XYZ coordinates, keep goal as-is
+    train_inputs = [torch.cat([(inp[:, :3] - mean) / std, inp[:, 3:]], dim=1) for inp in train_inputs]
+    train_targets = normalize_paths(train_targets, mean, std)
+
+    train_inputs, input_lengths = pad_with_last(train_inputs)
+    train_targets, target_lengths = pad_with_last(train_targets)
+
+    all_inputs = torch.stack(train_inputs)
+    all_targets = torch.stack(train_targets)
+    lengths = torch.tensor(input_lengths)
+
+    print(f"Total dataset size: {len(all_inputs)}")
+    print(f"Min sequence length: {lengths.min()}, Max sequence length: {lengths.max()}")
+
+    total_size = all_inputs.size(0)
     train_size = int(0.8 * total_size)
     val_size = int(0.1 * total_size)
     test_size = total_size - train_size - val_size
-    
+
+    print(f"Train size: {train_size}, Val size: {val_size}, Test size: {test_size}")
+
+    class SequenceDataset(torch.utils.data.Dataset):
+        def __init__(self, inputs, targets, lengths):
+            self.inputs = inputs
+            self.targets = targets
+            self.lengths = lengths
+        def __len__(self):
+            return len(self.inputs)
+        def __getitem__(self, idx):
+            return self.inputs[idx], self.targets[idx], self.lengths[idx]
+
+    full_dataset = SequenceDataset(all_inputs, all_targets, lengths)
+
     train_dataset, val_dataset, test_dataset = random_split(
-        full_dataset, [train_size, val_size, test_size],
-        generator=torch.Generator().manual_seed(42)
+        full_dataset, [train_size, val_size, test_size]
     )
-    
-    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=2)
-    val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=2)
-    test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=2)
-    
-    print(f"Train: {len(train_dataset)} | Val: {len(val_dataset)} | Test: {len(test_dataset)}")
-    print("="*60)
-    
-    # Initialize model
-    model = DubinsLSTM(
-        input_dim=8,  # [x0, y0, z0, x_goal, y_goal, z_goal, heading, climb]
-        hidden_dim=HIDDEN_DIM,
-        output_dim=3,
-        num_layers=NUM_LAYERS,
-        dropout=DROPOUT
-    ).to(device)
-    
-    print("\n" + "="*60)
-    print("MODEL ARCHITECTURE")
-    print("="*60)
-    print(model)
-    print("="*60)
-    
-    total_params = sum(p.numel() for p in model.parameters())
-    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f"Total parameters: {total_params:,}")
-    print(f"Trainable parameters: {trainable_params:,}")
-    print("="*60)
-    
-    # Optimizer and loss
-    optimizer = torch.optim.Adam(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode='min', factor=0.5, patience=5
-    )
-    criterion = nn.MSELoss()
-    
-    print("\nOptimizer: Adam")
-    print(f"Learning Rate: {LR}")
-    print(f"Scheduler: ReduceLROnPlateau (factor=0.5, patience=5)")
-    
-    # Log hyperparameters
-    hparams = {
-        'batch_size': BATCH_SIZE,
-        'learning_rate': LR,
-        'hidden_dim': HIDDEN_DIM,
-        'num_layers': NUM_LAYERS,
-        'dropout': DROPOUT,
-    }
-    
-    # Training loop
+
+    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False)
+    test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False)
+
+    class DubinsLSTM(nn.Module):
+        def __init__(self, input_dim=6, hidden_dim=128, num_layers=2, output_dim=3, dropout=0.2):
+            super().__init__()
+            self.lstm = nn.LSTM(
+                input_dim,
+                hidden_dim,
+                num_layers=num_layers,
+                batch_first=True,
+                dropout=dropout if num_layers > 1 else 0
+            )
+            self.fc = nn.Linear(hidden_dim, output_dim)
+
+        def forward(self, x, lengths):
+            packed = pack_padded_sequence(x, lengths.cpu(), batch_first=True, enforce_sorted=False)
+            packed_out, _ = self.lstm(packed)
+            out, _ = pad_packed_sequence(packed_out, batch_first=True)
+            out = self.fc(out)
+            return out
+
+    model = DubinsLSTM().to(device)
+
+    optimizer = torch.optim.AdamW(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5, verbose=True)
+    criterion = nn.MSELoss(reduction='none')
+
     best_val_loss = float('inf')
-    patience_counter = 0
-    max_patience = 15
-    
     train_losses = []
     val_losses = []
-    
-    print("\n" + "="*60)
-    print("TRAINING")
-    print("="*60)
-    
+
+    writer = SummaryWriter(log_dir="runs/dubins_lstm_fixed")
+
     for epoch in range(NUM_EPOCHS):
-        # Training
         model.train()
         epoch_loss = 0.0
-        
-        for batch_idx, (metadata, trajectory, seq_len) in enumerate(train_loader):
-            metadata = metadata.to(device)
-            trajectory = trajectory.to(device)
-            
+        total_valid_points = 0
+
+        print(f"\n{'='*50}")
+        print(f"Epoch {epoch+1}/{NUM_EPOCHS}")
+        print(f"Learning Rate: {optimizer.param_groups[0]['lr']:.6f}")
+
+        for batch_num, (batch_in, batch_out, batch_len) in enumerate(train_loader, 1):
+            batch_in, batch_out, batch_len = batch_in.to(device), batch_out.to(device), batch_len.to(device)
             optimizer.zero_grad()
+
+            preds = model(batch_in, batch_len)
+
+            # Create mask for valid sequence positions
+            mask = torch.arange(preds.size(1), device=device).unsqueeze(0) < batch_len.unsqueeze(1)
+            mask = mask.unsqueeze(2).expand_as(preds)
             
-            # Teacher forcing schedule (decreases over time)
-            teacher_forcing_ratio = max(0.5 * (1 - epoch / NUM_EPOCHS), 0.1)
-            max_len = int(seq_len.max().item())
+            # Compute loss only on valid positions
+            loss_per_point = criterion(preds, batch_out)
+            masked_loss = (loss_per_point * mask.float()).sum()
+            valid_points = mask.float().sum()
             
-            predictions = model(metadata, max_len, trajectory, teacher_forcing_ratio)
-            
-            # Calculate loss only on valid timesteps
-            loss = 0
-            for i in range(len(seq_len)):
-                valid_len = int(seq_len[i].item())
-                loss += criterion(predictions[i, :valid_len], trajectory[i, :valid_len])
-            loss /= len(seq_len)
-            
+            loss = masked_loss / valid_points
+
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
-            
-            epoch_loss += loss.item()
-            
-            # Log batch metrics
-            global_step = epoch * len(train_loader) + batch_idx
-            writer.add_scalar('Loss/train_batch', loss.item(), global_step)
-        
-        avg_train_loss = epoch_loss / len(train_loader)
+
+            epoch_loss += masked_loss.item()
+            total_valid_points += valid_points.item()
+
+        avg_train_loss = epoch_loss / total_valid_points
         train_losses.append(avg_train_loss)
-        
+        writer.add_scalar('Loss/train', avg_train_loss, epoch)
+
         # Validation
         model.eval()
         val_loss = 0.0
+        total_val_points = 0
         
         with torch.no_grad():
-            for metadata, trajectory, seq_len in val_loader:
-                metadata = metadata.to(device)
-                trajectory = trajectory.to(device)
+            for val_in, val_out, val_len in val_loader:
+                val_in, val_out, val_len = val_in.to(device), val_out.to(device), val_len.to(device)
+
+                # FIXED: Data is already normalized, don't modify it!
+                preds = model(val_in, val_len)
+
+                mask = torch.arange(preds.size(1), device=device).unsqueeze(0) < val_len.unsqueeze(1)
+                mask = mask.unsqueeze(2).expand_as(preds)
                 
-                max_len = int(seq_len.max().item())
-                predictions = model(metadata, max_len, None, 0.0)
-                
-                loss = 0
-                for i in range(len(seq_len)):
-                    valid_len = int(seq_len[i].item())
-                    loss += criterion(predictions[i, :valid_len], trajectory[i, :valid_len])
-                loss /= len(seq_len)
-                
-                val_loss += loss.item()
-        
-        avg_val_loss = val_loss / len(val_loader)
+                loss_per_point = criterion(preds, val_out)
+                masked_loss = (loss_per_point * mask.float()).sum()
+                valid_points = mask.float().sum()
+
+                val_loss += masked_loss.item()
+                total_val_points += valid_points.item()
+
+        avg_val_loss = val_loss / total_val_points
         val_losses.append(avg_val_loss)
-        
-        # Log epoch metrics
-        writer.add_scalar('Loss/train_epoch', avg_train_loss, epoch)
-        writer.add_scalar('Loss/val_epoch', avg_val_loss, epoch)
-        writer.add_scalar('Learning_Rate', optimizer.param_groups[0]['lr'], epoch)
-        writer.add_scalar('Teacher_Forcing_Ratio', teacher_forcing_ratio, epoch)
-        
-        # Learning rate scheduling
-        old_lr = optimizer.param_groups[0]['lr']
+        writer.add_scalar('Loss/validation', avg_val_loss, epoch)
+
+        print(f"Epoch [{epoch+1}/{NUM_EPOCHS}]  Train Loss: {avg_train_loss:.6f}  Val Loss: {avg_val_loss:.6f}")
+
         scheduler.step(avg_val_loss)
-        new_lr = optimizer.param_groups[0]['lr']
-        
-        if new_lr != old_lr:
-            print(f"  → Learning rate reduced: {old_lr:.6f} → {new_lr:.6f}")
-        
-        # Print progress
-        print(f"Epoch [{epoch+1:3d}/{NUM_EPOCHS}] "
-              f"Train: {avg_train_loss:.4f} | Val: {avg_val_loss:.4f} | "
-              f"LR: {optimizer.param_groups[0]['lr']:.6f} | "
-              f"TF: {teacher_forcing_ratio:.2f}")
-        
-        # Save best model
+
         if avg_val_loss < best_val_loss:
             best_val_loss = avg_val_loss
             torch.save({
-                'epoch': epoch,
                 'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'train_loss': avg_train_loss,
-                'val_loss': avg_val_loss,
-            }, 'best_dubins_lstm.pth')
-            print(f"  ★ Best model saved! Val Loss: {best_val_loss:.4f}")
-            patience_counter = 0
-        else:
-            patience_counter += 1
-        
-        # Early stopping
-        if patience_counter >= max_patience:
-            print(f"\n⚠ Early stopping at epoch {epoch+1}")
-            break
-    
-    print("="*60)
-    
-    # Test evaluation
-    print("\n" + "="*60)
-    print("TESTING")
-    print("="*60)
-    
-    checkpoint = torch.load('best_dubins_lstm.pth')
-    model.load_state_dict(checkpoint['model_state_dict'])
-    model.eval()
-    
-    test_loss = 0.0
-    with torch.no_grad():
-        for metadata, trajectory, seq_len in test_loader:
-            metadata = metadata.to(device)
-            trajectory = trajectory.to(device)
-            
-            max_len = int(seq_len.max().item())
-            predictions = model(metadata, max_len, None, 0.0)
-            
-            loss = 0
-            for i in range(len(seq_len)):
-                valid_len = int(seq_len[i].item())
-                loss += criterion(predictions[i, :valid_len], trajectory[i, :valid_len])
-            loss /= len(seq_len)
-            
-            test_loss += loss.item()
-    
-    avg_test_loss = test_loss / len(test_loader)
-    print(f"Test Loss: {avg_test_loss:.4f}")
-    print("="*60)
-    
-    writer.add_scalar('Loss/test', avg_test_loss, 0)
-    
-    # Log final hyperparameters with test metric
-    writer.add_hparams(
-        hparams,
-        {
-            'hparam/test_loss': avg_test_loss,
-            'hparam/best_val_loss': best_val_loss,
-            'hparam/final_train_loss': train_losses[-1]
-        }
-    )
-    
+                'mean': mean,
+                'std': std,
+                'epoch': epoch,
+                'val_loss': avg_val_loss
+            }, "./best_dubins_lstm.pth")
+            print(f"\n★ Epoch {epoch+1}: New best validation loss {best_val_loss:.6f}")
+
     writer.close()
+
+    # Test evaluation
+    print("\nFinal evaluation on test set")
+    test_loss = 0.0
+    total_test_points = 0
     
+    with torch.no_grad():
+        for test_in, test_out, test_len in test_loader:
+            test_in, test_out, test_len = test_in.to(device), test_out.to(device), test_len.to(device)
+
+            preds = model(test_in, test_len)
+
+            mask = torch.arange(preds.size(1), device=device).unsqueeze(0) < test_len.unsqueeze(1)
+            mask = mask.unsqueeze(2).expand_as(preds)
+
+            loss_per_point = criterion(preds, test_out)
+            masked_loss = (loss_per_point * mask.float()).sum()
+            valid_points = mask.float().sum()
+
+            test_loss += masked_loss.item()
+            total_test_points += valid_points.item()
+
+    avg_test_loss = test_loss / total_test_points
+    print(f"\nFinal Test Loss: {avg_test_loss:.6f}")
+
     # Plot training curves
     plt.figure(figsize=(10, 6))
-    plt.plot(train_losses, label='Train Loss', linewidth=2)
-    plt.plot(val_losses, label='Validation Loss', linewidth=2)
-    plt.axhline(y=avg_test_loss, color='r', linestyle='--', label=f'Test Loss ({avg_test_loss:.2f})')
-    plt.xlabel('Epoch', fontsize=12)
-    plt.ylabel('MSE Loss', fontsize=12)
-    plt.title('Training and Validation Loss', fontsize=14)
-    plt.legend(fontsize=11)
-    plt.grid(True, alpha=0.3)
-    plt.tight_layout()
-    plt.savefig('training_curves.png', dpi=300, bbox_inches='tight')
-    print(f"\n✓ Loss curves saved: training_curves.png")
-    
-    return model, test_dataset
+    plt.plot(train_losses, label='Training Loss')
+    plt.plot(val_losses, label='Validation Loss')
+    plt.xlabel('Epoch')
+    plt.ylabel('MSE Loss')
+    plt.title('Training and Validation Loss')
+    plt.legend()
+    plt.grid(True)
+    plt.savefig('training_curves.png')
+    plt.close()
 
-# ===============================
-# Visualization
-# ===============================
-def plot_predictions(model, test_dataset, num_samples=10):
-    """Generate prediction plots."""
-    save_dir = "plots/test_predictions"
-    os.makedirs(save_dir, exist_ok=True)
-    
-    print("\n" + "="*60)
-    print(f"GENERATING {num_samples} PREDICTION PLOTS")
-    print("="*60)
-    
-    model.eval()
-    
-    for i in range(min(num_samples, len(test_dataset))):
-        metadata, trajectory, seq_len = test_dataset[i]
-        
-        metadata_input = metadata.unsqueeze(0).to(device)
-        valid_len = int(seq_len.item())
-        
-        # Predict
-        with torch.no_grad():
-            prediction = model(metadata_input, valid_len, None, 0.0)
-        
-        pred_np = prediction[0].cpu().numpy()
-        gt_np = trajectory[:valid_len].cpu().numpy()
-        
-        # Plot
-        fig = plt.figure(figsize=(12, 9))
-        ax = fig.add_subplot(111, projection='3d')
-        
-        # Ground truth
-        ax.plot(gt_np[:, 0], gt_np[:, 1], gt_np[:, 2],
-                'g-', linewidth=3, label='Ground Truth', alpha=0.8)
-        
-        # Prediction
-        ax.plot(pred_np[:, 0], pred_np[:, 1], pred_np[:, 2],
-                'r--', linewidth=2.5, label='Prediction', alpha=0.8)
-        
-        # Markers
-        ax.plot([0], [0], [0], 'b*', markersize=20, label='Start', zorder=5)
-        ax.plot([metadata[3].item()], [metadata[4].item()], [metadata[5].item()],
-                'm*', markersize=20, label='Goal', zorder=5)
-        
-        ax.set_xlabel('East (m)', fontsize=13, fontweight='bold')
-        ax.set_ylabel('North (m)', fontsize=13, fontweight='bold')
-        ax.set_zlabel('Altitude (m)', fontsize=13, fontweight='bold')
-        
-        heading_deg = metadata[6].item() * 180 / np.pi
-        climb_deg = metadata[7].item() * 180 / np.pi
-        ax.set_title(f'Test Trajectory {i+1}\n'
-                     f'Heading: {heading_deg:.0f}° | Climb: {climb_deg:.0f}°',
-                     fontsize=15, fontweight='bold')
-        
-        ax.legend(fontsize=11, loc='upper right')
-        ax.grid(True, alpha=0.3)
-        
-        # Calculate MSE
-        mse = np.mean((pred_np - gt_np)**2)
-        max_error = np.max(np.linalg.norm(pred_np - gt_np, axis=1))
-        
-        textstr = f'MSE: {mse:.2f}\nMax Error: {max_error:.2f}m'
-        ax.text2D(0.05, 0.95, textstr,
-                  transform=ax.transAxes, fontsize=11,
-                  verticalalignment='top',
-                  bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
-        
-        plt.savefig(f'{save_dir}/test_trajectory_{i+1}.png',
-                    dpi=300, bbox_inches='tight')
-        plt.close()
-        
-        print(f"  ✓ Plot {i+1}/{num_samples} saved (MSE: {mse:.2f})")
-    
-    print(f"\n✓ All plots saved to: {save_dir}/")
-    print("="*60)
+    return model, test_dataset, mean, std
 
-# ===============================
-# Main Execution
-# ===============================
-if __name__ == "__main__":
-    print("\n" + "="*60)
-    print("RBE 577 HW3: DUBINS AIRPLANE TRAJECTORY PREDICTION")
-    print("LSTM Encoder-Decoder Model")
-    print("="*60)
-    
-    # Load or generate dataset
-    if os.path.exists('Data.mat'):
-        dataset = load_dataset_from_mat('Data.mat')
-    else:
-        dataset = generate_dataset()
-    
-    # Train model
-    model, test_dataset = train_model(dataset)
-    
-    # Save final model
-    print("\n" + "="*60)
-    print("SAVING MODEL")
-    print("="*60)
-    torch.save(model.state_dict(), 'dubins_lstm_final.pth')
-    print("✓ Final model saved: dubins_lstm_final.pth")
-    print("✓ Best model saved: best_dubins_lstm.pth")
-    print("="*60)
-    
-    # Generate prediction plots
-    plot_predictions(model, test_dataset, num_samples=10)
-    
-    # Final summary
-    print("\n" + "="*60)
-    print("✓ TRAINING COMPLETE!")
-    print("="*60)
-    print("\nGenerated files:")
-    print("  • best_dubins_lstm.pth - Best model checkpoint")
-    print("  • dubins_lstm_final.pth - Final model")
-    print("  • training_curves.png - Loss curves")
-    print("  • plots/test_predictions/*.png - 10 test predictions")
-    print("  • runs/ - TensorBoard logs")
-    print("\nTo view TensorBoard:")
-    print("  tensorboard --logdir=runs --port=6006")
-    print("  Open: http://localhost:6006")
-    print("="*60 + "\n")
+print("Generating dataset...")
+dataset = generate_dataset()
+print(f"Dataset generated with {len(dataset)} samples")
+
+print("\nStarting training...")
+model, test_dataset, mean, std = train_lstm(dataset)
+print("\nTraining completed!")
+
+print("Saving model...")
+torch.save({
+    'model_state_dict': model.state_dict(),
+    'mean': mean,
+    'std': std
+}, "./dubins_lstm_final.pth")
+print("Model saved to 'dubins_lstm_final.pth'")
