@@ -37,7 +37,7 @@ def dubinEHF3d(east1, north1, alt1, psi1, east2, north2, r, step, gamma, data_co
     d2c_r = np.sqrt(d2c_r_sq)
 
     if d2c_l < r or d2c_r < r:
-        print(str(data_count) + ": No solution: Distance to goal is less than turn radius.")
+        # print(str(data_count) + ": No solution: Distance to goal is less than turn radius.")
        
         return np.zeros((0, 3)), 0, 0
 
@@ -141,7 +141,7 @@ def dubinEHF3d(east1, north1, alt1, psi1, east2, north2, r, step, gamma, data_co
         path[:num_path_points, :] = arc_traj
 
     psi_end = np.arctan2(north2-arc_traj[-1, 1], east2-arc_traj[-1, 0])
-    print(str(data_count) + ": Solution Found!")
+    # print(str(data_count) + ": Solution Found!")
     return path, psi_end, num_path_points
 
 def test_dubinEHF3d():
