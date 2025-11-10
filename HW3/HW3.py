@@ -3,8 +3,6 @@ from dubinEHF3d import dubinEHF3d
 import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset, random_split
 import matplotlib.pyplot as plt
-from torch.nn.utils.rnn import pad_sequence
-import numpy as np
 import os
 
 # ===============================
@@ -15,8 +13,8 @@ dtype = torch.float32
 
 BATCH_SIZE = 64
 LR = 1e-3
-WEIGHT_DECAY = 1e-3
-NUM_EPOCHS = 12
+WEIGHT_DECAY = 1e-3  
+NUM_EPOCHS = 20
 
 turn_radius = 60
 path_step_size = 10
@@ -27,7 +25,7 @@ climb_angle_incrmement = 5
 
 grid_margin = 5
 grid_size = 2 * turn_radius * grid_margin
-grid_resolution = 30
+grid_resolution = 10
 
 
 # ===============================
@@ -36,10 +34,10 @@ grid_resolution = 30
 def generate_dataset():
     dataset = []
     data_count = 0
-    for climb_angle in range(-climb_angle_range, climb_angle_range, climb_angle_incrmement):
+    for climb_angle in range(-climb_angle_range, climb_angle_range, climb_angle_incrmement): 
         for start_heading in range(0, 360, heading_increment):
-            for x_spot in range(-grid_size // 2, grid_size // 2, grid_resolution):
-                for y_spot in range(-grid_size // 2, grid_size // 2, grid_resolution):
+            for x_spot in range(-grid_size//2, grid_size//2, grid_resolution):
+                for y_spot in range(-grid_size//2, grid_size//2, grid_resolution):
                     data_count += 1
                     path, end_heading, num_points = dubinEHF3d(
                         0, 0, 0,
@@ -48,106 +46,102 @@ def generate_dataset():
                         turn_radius, path_step_size,
                         climb_angle * (torch.pi / 180), data_count
                     )
-                    if path is None or len(path) == 0:
-                        continue
                     dataset.append((path, end_heading, num_points))
     return dataset
 
 
 # ===============================
-# Normalization Utilities
-# ===============================
-def compute_normalization_params(paths):
-    all_points = torch.cat(paths, dim=0)
-    mean = all_points.mean(dim=0)
-    std = all_points.std(dim=0) + 1e-8
-    return mean, std
-
-
-def normalize_paths(paths, mean, std):
-    return [(p - mean) / std for p in paths]
-
-
-def denormalize_paths(paths, mean, std):
-    return [(p * std) + mean for p in paths]
-
-
-# ===============================
-# Padding Utility
+# Padding Strategy
 # ===============================
 def pad_with_last(seq_list):
-    """Pad each path by extending the last value instead of zero-padding."""
-    max_len = max(len(seq) for seq in seq_list)
+    if len(seq_list) == 0:
+        raise ValueError("pad_with_last received an empty sequence list.")
+    max_len = max(len(s) for s in seq_list)
     padded = []
-    for seq in seq_list:
-        if len(seq) == 0:
-            continue
-        pad_len = max_len - len(seq)
-        last_val = seq[-1].unsqueeze(0).repeat(pad_len, 1)
-        padded_seq = torch.cat([seq, last_val], dim=0)
-        padded.append(padded_seq)
-    return padded
+    for s in seq_list:
+        pad_len = max_len - len(s)
+        if pad_len > 0:
+            pad_val = s[-1].unsqueeze(0).repeat(pad_len, 1)
+            s = torch.cat([s, pad_val], dim=0)
+        padded.append(s)
+    return torch.stack(padded)
+
+
+# ===============================
+# Normalization Helpers
+# ===============================
+def compute_normalization_params(data_list):
+    all_data = torch.cat(data_list, dim=0)
+    mean = all_data.mean(dim=0)
+    std = all_data.std(dim=0)
+    std[std == 0] = 1e-8
+    return mean, std
+
+def normalize_tensor(t, mean, std):
+    return (t - mean) / std
+
+def denormalize_tensor(t, mean, std):
+    return t * std + mean
 
 
 # ===============================
 # Training Function
 # ===============================
 def train_lstm(dataset):
-    train_inputs = []
-    train_targets = []
+    train_inputs, train_targets = [], []
+    removed_count = 0
 
     for path_tuple in dataset:
         path = torch.tensor(path_tuple[0], dtype=dtype)
-        if path.shape[0] < 2:
+        if path.dim() == 0 or path.numel() == 0 or path.shape[0] < 2:
+            removed_count += 1
             continue
+
         inputs = path[:-1]
         targets = path[1:]
+        if inputs.shape[0] == 0 or targets.shape[0] == 0:
+            removed_count += 1
+            continue
+
         train_inputs.append(inputs)
         train_targets.append(targets)
 
-    # ===============================
-    # Normalization
-    # ===============================
-    print("Computing normalization parameters...")
-    mean, std = compute_normalization_params(train_inputs + train_targets)
-    train_inputs = normalize_paths(train_inputs, mean, std)
-    train_targets = normalize_paths(train_targets, mean, std)
+    print(f"Filtered dataset: removed {removed_count} invalid/empty paths. Remaining sequences: {len(train_inputs)}")
 
-    # Pad sequences (using last value)
-    train_inputs = pad_with_last(train_inputs)
-    train_targets = pad_with_last(train_targets)
+    # Compute normalization params
+    all_concat = train_inputs + train_targets
+    mean, std = compute_normalization_params(all_concat)
+    print(f"Dataset normalization → mean: {mean.tolist()}, std: {std.tolist()}")
 
-    all_inputs = pad_sequence(train_inputs, batch_first=True)
-    all_targets = pad_sequence(train_targets, batch_first=True)
+    # Normalize
+    norm_inputs = [normalize_tensor(x, mean, std) for x in train_inputs]
+    norm_targets = [normalize_tensor(x, mean, std) for x in train_targets]
 
+    # Pad normalized sequences
+    all_inputs = pad_with_last(norm_inputs)
+    all_targets = pad_with_last(norm_targets)
     full_dataset = TensorDataset(all_inputs, all_targets)
 
+    # Split
     total_size = len(full_dataset)
     train_size = int(0.8 * total_size)
     val_size = int(0.1 * total_size)
     test_size = total_size - train_size - val_size
+    train_dataset, val_dataset, test_dataset = random_split(full_dataset, [train_size, val_size, test_size])
 
-    train_dataset, val_dataset, test_dataset = random_split(
-        full_dataset, [train_size, val_size, test_size]
-    )
-
+    # Loaders
     train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
     val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False)
     test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False)
 
     # ===============================
-    # Model Definition (LSTM)
+    # Model Definition
     # ===============================
     class DubinsLSTM(nn.Module):
         def __init__(self, input_dim=3, hidden_dim=64, num_layers=3, output_dim=3, dropout=0.2):
             super().__init__()
-            self.lstm = nn.LSTM(
-                input_dim,
-                hidden_dim,
-                num_layers=num_layers,
-                batch_first=True,
-                dropout=dropout
-            )
+            self.lstm = nn.LSTM(input_dim, hidden_dim, num_layers=num_layers,
+                                batch_first=True, dropout=dropout)
             self.fc = nn.Linear(hidden_dim, output_dim)
 
         def forward(self, x):
@@ -156,16 +150,14 @@ def train_lstm(dataset):
             return out
 
     model = DubinsLSTM().to(device)
-
     optimizer = torch.optim.AdamW(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
     criterion = nn.MSELoss()
 
     best_val_loss = float('inf')
-    train_losses = []
-    val_losses = []
+    train_losses, val_losses = [], []
 
     # ===============================
-    # Training Loop
+    # Training Loop (original print style preserved)
     # ===============================
     for epoch in range(NUM_EPOCHS):
         model.train()
@@ -179,12 +171,10 @@ def train_lstm(dataset):
         for batch_num, (batch_in, batch_out) in enumerate(train_loader, 1):
             batch_in, batch_out = batch_in.to(device), batch_out.to(device)
             optimizer.zero_grad()
-
             preds = model(batch_in)
             loss = criterion(preds, batch_out)
             loss.backward()
             optimizer.step()
-
             epoch_loss += loss.item()
             running_loss = epoch_loss / batch_num
 
@@ -194,15 +184,17 @@ def train_lstm(dataset):
                 print(f"Running Avg Loss: {running_loss:.6f}")
 
                 with torch.no_grad():
-                    sample_pred = preds[0].cpu() * std + mean
-                    sample_target = batch_out[0].cpu() * std + mean
-                    print("\nSample Prediction vs Target (denormalized, first point in batch):")
+                    # Denormalize for display (exact original style)
+                    sample_pred = denormalize_tensor(preds[0].cpu(), mean, std).numpy()
+                    sample_target = denormalize_tensor(batch_out[0].cpu(), mean, std).numpy()
+                    print("\nSample Prediction vs Target (first point in batch):")
                     print(f"Pred:   (x={sample_pred[0][0]:.2f}, y={sample_pred[0][1]:.2f}, z={sample_pred[0][2]:.2f})")
                     print(f"Target: (x={sample_target[0][0]:.2f}, y={sample_target[0][1]:.2f}, z={sample_target[0][2]:.2f})")
 
         avg_train_loss = epoch_loss / total_batches
         train_losses.append(avg_train_loss)
 
+        # Validation
         model.eval()
         val_loss = 0.0
         with torch.no_grad():
@@ -222,6 +214,9 @@ def train_lstm(dataset):
 
         print(f"Epoch [{epoch+1}/{NUM_EPOCHS}]  Train Loss: {avg_train_loss:.6f}  Val Loss: {avg_val_loss:.6f}")
 
+    # ===============================
+    # Final Test
+    # ===============================
     print("\nEvaluating on Test Set...")
     model.load_state_dict(torch.load("./best_dubins_lstm.pth"))
     model.eval()
@@ -235,6 +230,7 @@ def train_lstm(dataset):
     avg_test_loss = test_loss / len(test_loader)
     print(f"\nFinal Test Loss: {avg_test_loss:.6f}")
 
+    # Plot loss curves
     plt.figure()
     plt.plot(train_losses, label="Train Loss")
     plt.plot(val_losses, label="Validation Loss")
@@ -249,7 +245,7 @@ def train_lstm(dataset):
 
 
 # ===============================
-# Main Execution
+# Main
 # ===============================
 print("Generating dataset...")
 dataset = generate_dataset()
@@ -265,11 +261,10 @@ print("Model saved to 'dubins_lstm_final.pth'")
 
 
 # ===============================
-# Plot Test Set Paths with Ground Truth
+# Plot Predictions vs Ground Truth
 # ===============================
 save_dir = "plots/test_paths"
 os.makedirs(save_dir, exist_ok=True)
-
 num_samples_to_plot = 10
 subset_indices = range(min(num_samples_to_plot, len(test_dataset)))
 
@@ -277,41 +272,21 @@ print(f"\nSaving {len(subset_indices)} test paths with predictions and ground tr
 
 for i, idx in enumerate(subset_indices, start=1):
     inputs, targets = test_dataset[idx]
+    inputs_np = denormalize_tensor(inputs, mean, std).cpu().numpy()
+    targets_np = denormalize_tensor(targets, mean, std).cpu().numpy()
 
-    inputs_np = inputs.cpu().numpy()
-    targets_np = targets.cpu().numpy()
-
-    # Detect when padding starts (points stop changing)
-    diffs = np.diff(targets_np, axis=0)
-    stopped = np.all(np.isclose(diffs, 0, atol=1e-6), axis=1)
-    if np.any(stopped):
-        stop_idx = np.argmax(stopped)
-        targets_np = targets_np[:stop_idx + 1]
-        inputs_np = inputs_np[:stop_idx + 1]
+    num_valid_points = (targets_np != 0).any(axis=1).sum()
+    if num_valid_points == 0:
+        continue
+    inputs_np = inputs_np[:num_valid_points]
+    targets_np = targets_np[:num_valid_points]
 
     model.eval()
     with torch.no_grad():
-        inp_tensor = torch.tensor(inputs_np, dtype=dtype).unsqueeze(0).to(device)
-        pred_np = model(inp_tensor).squeeze(0).cpu().numpy()
-
-    # Match ground truth length
-    valid_len = len(targets_np)
-    pred_np = pred_np[:valid_len]
-
-    # Denormalize both
-    pred_np = (pred_np * std.cpu().numpy()) + mean.cpu().numpy()
-    targets_np = (targets_np * std.cpu().numpy()) + mean.cpu().numpy()
-
-    # Re-run padding stop check on both to ensure no trailing flat region
-    for arr_name, arr in [("pred", pred_np), ("target", targets_np)]:
-        diffs = np.diff(arr, axis=0)
-        stopped = np.all(np.isclose(diffs, 0, atol=1e-6), axis=1)
-        if np.any(stopped):
-            stop_idx = np.argmax(stopped)
-            if arr_name == "pred":
-                pred_np = arr[:stop_idx + 1]
-            else:
-                targets_np = arr[:stop_idx + 1]
+        inp_tensor = normalize_tensor(torch.tensor(inputs_np, dtype=dtype), mean, std).unsqueeze(0).to(device)
+        pred_np = model(inp_tensor).squeeze(0).cpu()
+        pred_np = denormalize_tensor(pred_np, mean, std).numpy()
+        pred_np = pred_np[:len(targets_np)]
 
     fig = plt.figure()
     ax = fig.add_subplot(111, projection='3d')
@@ -323,8 +298,7 @@ for i, idx in enumerate(subset_indices, start=1):
     ax.set_title(f"Test Path {i}")
     ax.legend()
 
-    path_file = os.path.join(save_dir, f"test_path_{i}.png")
-    plt.savefig(path_file, dpi=300, bbox_inches="tight")
+    plt.savefig(os.path.join(save_dir, f"test_path_{i}.png"), dpi=300, bbox_inches="tight")
     plt.close(fig)
 
 print("✅ Test paths with ground truth and predictions saved successfully.")
