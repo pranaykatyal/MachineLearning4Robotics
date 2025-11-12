@@ -14,7 +14,7 @@ dtype = torch.float32
 BATCH_SIZE = 64
 LR = 1e-3
 WEIGHT_DECAY = 1e-4
-NUM_EPOCHS = 10
+NUM_EPOCHS = 100
 HIDDEN_DIM = 256
 NUM_LAYERS = 3
 DROPOUT = 0.3
@@ -29,7 +29,7 @@ climb_angle_range = 30
 climb_angle_increment = 5
 grid_margin = 5
 grid_size = 2 * turn_radius * grid_margin
-grid_resolution = 10
+grid_resolution = 40
 
 def rotate_to_body_frame(points, heading):
     cos_h = np.cos(-heading)
