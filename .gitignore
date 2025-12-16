@@ -101,9 +101,19 @@ data/
 datasets/
 raw_data/
 
-# Large image formats from datasets
+# Large TIFF depth maps (EVERYWHERE - this is the key!)
 *.tif
 *.tiff
+
+# Also explicitly exclude from specific locations
+Dataset_1/**/*.tif
+Dataset_1/**/*.tiff
+Dataset_2/**/*.tif
+Dataset_2/**/*.tiff
+Dataset_3/**/*.tif
+Dataset_3/**/*.tiff
+M4Depth/**/*.tif
+M4Depth/**/*.tiff
 
 # Compressed datasets
 *.zip
@@ -127,6 +137,21 @@ models/
 saved_models/
 
 # ============================================
+# M4DEPTH SPECIFIC (EXCLUDE ALL IMAGES)
+# ============================================
+
+# Exclude ALL images in M4Depth directory
+M4Depth/**/*.png
+M4Depth/**/*.jpg
+M4Depth/**/*.jpeg
+M4Depth/**/*.gif
+M4Depth/**/*.bmp
+
+# Exclude M4Depth evaluation outputs
+M4Depth/**/eval_outputs/
+M4Depth/**/train_outputs/
+
+# ============================================
 # KEEP THESE FILES (IMPORTANT!)
 # ============================================
 
@@ -134,9 +159,12 @@ saved_models/
 !results/**/*.png
 !docs/**/*.png
 !figures/**/*.png
+!HWFinal/results/**/*.png
+!HWFinal/docs/**/*.png
 
 # Keep documentation PDFs
 !docs/**/*.pdf
+!HWFinal/docs/**/*.pdf
 !*.pdf
 
 # Keep all Python scripts (*.py is NOT excluded, included by default)
