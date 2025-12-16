@@ -1,12 +1,7 @@
-# Byte-compiled / optimized / DLL files
-__pycache__/
+# Python
 *.py[cod]
 *$py.class
-
-# C extensions
 *.so
-
-# Distribution / packaging
 .Python
 build/
 develop-eggs/
@@ -19,90 +14,114 @@ lib64/
 parts/
 sdist/
 var/
+wheels/
 *.egg-info/
+.installed.cfg
 *.egg
+MANIFEST
+__pycache__/
+*.pyc
 
-# Installer logs
-pip-log.txt
-pip-delete-this-directory.txt
-
-# Unit test / coverage reports
-.tox/
-.nox/
-.coverage
-.coverage.*
-.cache
-.pytest_cache/
-cover/
-hypothesis/
-
-# Jupyter Notebook
-.ipynb_checkpoints
-
-# pyenv
-/.python-version
-
-# virtualenv
+# Virtual Environments
 venv/
 ENV/
 env/
-env.bak/
-venv.bak/
+.venv
 
-# VS Code settings
+# TensorFlow / ML
+*.ckpt
+*.ckpt.*
+*.pb
+*.pbtxt
+*.h5
+*.hdf5
+*.tfrecords
+*.tflite
+events.out.tfevents.*
+checkpoint
+*.index
+*.data-*
+*.meta
+
+# Jupyter Notebooks
+.ipynb_checkpoints/
+*.ipynb
+
+# IDEs
 .vscode/
-
-# PyCharm
 .idea/
-
-# macOS
+*.swp
+*.swo
+*~
 .DS_Store
 
-# logs
-*.log
-
-# Environment files
-environment.yml
-requirements.txt
-
-# Image files
+# Data Files (Large datasets - should not be in git)
+data/
+datasets/
+*.zip
+*.tar
+*.tar.gz
+*.tif
+*.tiff
 *.png
 *.jpg
 *.jpeg
 *.gif
 *.bmp
-*.tiff
-*.tif
-*.webp
-# Ignore zip files
-*.zip
 
-# Video files
-*.mp4
-*.mov
-*.avi
-*.mkv
-*.flv
-*.webm
-*.wmv
-
-# Large data files
-*.h5
-*.hdf5
-*.npy
-*.npz
+# Model Checkpoints & Weights (Too large for git)
+pretrained_weights/
+checkpoints/
 *.ckpt
 *.pth
 *.pt
-
-# Dataset and model cache
-data/
+*.pkl
+*.pickle
+weights/
 models/
 
-# Ignore vector cache folder used by some embedding libraries
-.vector_cache/
+# Logs & Outputs
+logs/
+*.log
+tensorboard/
+wandb/
+mlruns/
 
-*.err
-*.out
-*.sh
+# SLURM
+slurm-*.out
+*.sbatch.log
+
+# Temporary Files
+tmp/
+temp/
+*.tmp
+*.cache
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Compiled
+*.pyc
+*.pyo
+*.pyd
+.so
+.dll
+
+# Coverage reports
+htmlcov/
+.coverage
+.coverage.*
+coverage.xml
+*.cover
+
+# Keep specific result files but ignore intermediate outputs
+results/*/intermediate/
+results/*/checkpoints/
+
+# Keep these (comment out if you want to track them)
+# !results/phase1/*.png
+# !results/phase2/*.png
+# !docs/*.pdf
 
