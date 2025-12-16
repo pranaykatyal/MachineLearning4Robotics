@@ -93,7 +93,7 @@ mlruns/
 # DATASET FILES (EXCLUDE - TOO LARGE)
 # ============================================
 
-# Raw dataset directories
+# Raw dataset directories (ANYWHERE)
 Dataset_1/
 Dataset_2/
 Dataset_3/
@@ -101,25 +101,24 @@ data/
 datasets/
 raw_data/
 
-# Large TIFF depth maps (EVERYWHERE - this is the key!)
+# Specifically in FinalProject
+FinalProject/**/Dataset_1/
+FinalProject/**/Dataset_2/
+FinalProject/**/Dataset_3/
+
+# Large TIFF depth maps (EVERYWHERE)
 *.tif
 *.tiff
-
-# Also explicitly exclude from specific locations
-Dataset_1/**/*.tif
-Dataset_1/**/*.tiff
-Dataset_2/**/*.tif
-Dataset_2/**/*.tiff
-Dataset_3/**/*.tif
-Dataset_3/**/*.tiff
-M4Depth/**/*.tif
-M4Depth/**/*.tiff
 
 # Compressed datasets
 *.zip
 *.tar
 *.tar.gz
 *.7z
+
+# Also exclude UseGeo.zip specifically
+UseGeo.zip
+**/UseGeo.zip
 
 # ============================================
 # MODEL WEIGHTS (EXCLUDE - TOO LARGE)
@@ -140,32 +139,55 @@ saved_models/
 # M4DEPTH SPECIFIC (EXCLUDE ALL IMAGES)
 # ============================================
 
-# Exclude ALL images in M4Depth directory
+# Exclude ALL images in M4Depth directory (ANYWHERE)
 M4Depth/**/*.png
 M4Depth/**/*.jpg
 M4Depth/**/*.jpeg
 M4Depth/**/*.gif
 M4Depth/**/*.bmp
+M4Depth/**/*.tif
+M4Depth/**/*.tiff
 
 # Exclude M4Depth evaluation outputs
 M4Depth/**/eval_outputs/
 M4Depth/**/train_outputs/
+M4Depth/**/pretrained_weights/
+
+# Also in FinalProject
+FinalProject/**/M4Depth/**/*.png
+FinalProject/**/M4Depth/**/*.jpg
+FinalProject/**/M4Depth/**/*.tif
+FinalProject/**/M4Depth/**/*.tiff
+FinalProject/**/M4Depth/**/eval_outputs/
+FinalProject/**/M4Depth/**/train_outputs/
+FinalProject/**/M4Depth/**/pretrained_weights/
+
+# ============================================
+# USEGEO DIRECTORIES (EXCLUDE)
+# ============================================
+
+# Raw UseGeo directories
+UseGeo/
+usegeo_github/
+FinalProject/**/UseGeo/
+FinalProject/**/usegeo_github/
 
 # ============================================
 # KEEP THESE FILES (IMPORTANT!)
 # ============================================
 
-# Keep result visualizations (PNG images in results/)
+# Keep result visualizations ONLY in these specific folders
 !results/**/*.png
-!docs/**/*.png
-!figures/**/*.png
-!HWFinal/results/**/*.png
-!HWFinal/docs/**/*.png
+!Phase1_Results/**/*.png
+!Phase2_Results/**/*.png
+!FinalProject/HWFin/results/**/*.png
+!FinalProject/HWFin/Phase1_Results/**/*.png
+!FinalProject/HWFin/Phase2_Results/**/*.png
 
 # Keep documentation PDFs
-!docs/**/*.pdf
-!HWFinal/docs/**/*.pdf
 !*.pdf
+!docs/**/*.pdf
+!FinalProject/HWFin/*.pdf
 
 # Keep all Python scripts (*.py is NOT excluded, included by default)
 # Keep all shell scripts (*.sh is NOT excluded, included by default)
@@ -179,11 +201,10 @@ train_outputs/
 eval_outputs/
 output/
 
-# Records/CSV with huge pose data (optional - uncomment if needed)
+# Logs
+logs/
+**/logs/
+
+# Records/CSV with huge pose data (optional)
 # records/
 # poses/
-
-# If you want to exclude most records but keep examples:
-# records/*
-# !records/example_*.csv
-# !records/README.md
