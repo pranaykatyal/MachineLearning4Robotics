@@ -1,0 +1,20 @@
+[200~# Exclude large directories
+Dataset_1/
+Dataset_2/
+Dataset_3/
+M4Depth/
+UseGeo/
+usegeo_github/
+logs/
+
+# Exclude large files
+UseGeo.zip
+*.tif
+*.tiff
+*.ckpt
+*.ckpt.*
+
+# But keep results
+!results/
+!Phase1_Results/
+!Phase2_Results/~

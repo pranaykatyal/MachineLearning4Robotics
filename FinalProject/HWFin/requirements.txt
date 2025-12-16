@@ -1,0 +1,26 @@
+# Core Dependencies
+tensorflow-gpu==2.10.0
+numpy>=1.19.0
+scipy>=1.5.0
+pillow>=8.0.0
+matplotlib>=3.3.0
+pandas>=1.1.0
+
+# Data Processing
+opencv-python>=4.5.0
+scikit-image>=0.17.0
+
+# Utilities
+tqdm>=4.50.0
+pyyaml>=5.3.0
+
+# Optional (for visualization)
+seaborn>=0.11.0
+plotly>=4.14.0
+
+# For pose conversion
+pyquaternion>=0.9.9
+
+# Development (optional)
+jupyter>=1.0.0
+ipython>=7.0.0
