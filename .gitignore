@@ -28,7 +28,7 @@ ENV/
 env/
 .venv
 
-# TensorFlow / ML
+# TensorFlow / ML - Model files (LARGE)
 *.ckpt
 *.ckpt.*
 *.pb
@@ -53,49 +53,6 @@ checkpoint
 *.swp
 *.swo
 *~
-.DS_Store
-
-# Data Files (Large datasets - should not be in git)
-data/
-datasets/
-*.zip
-*.tar
-*.tar.gz
-*.tif
-*.tiff
-*.png
-*.jpg
-*.jpeg
-*.gif
-*.bmp
-
-# Model Checkpoints & Weights (Too large for git)
-pretrained_weights/
-checkpoints/
-*.ckpt
-*.pth
-*.pt
-*.pkl
-*.pickle
-weights/
-models/
-
-# Logs & Outputs
-logs/
-*.log
-tensorboard/
-wandb/
-mlruns/
-
-# SLURM
-slurm-*.out
-*.sbatch.log
-
-# Temporary Files
-tmp/
-temp/
-*.tmp
-*.cache
 
 # OS
 .DS_Store
@@ -116,12 +73,89 @@ htmlcov/
 coverage.xml
 *.cover
 
-# Keep specific result files but ignore intermediate outputs
-results/*/intermediate/
-results/*/checkpoints/
+# SLURM
+slurm-*.out
+*.sbatch.log
 
-# Keep these (comment out if you want to track them)
-# !results/phase1/*.png
-# !results/phase2/*.png
-# !docs/*.pdf
+# Temporary Files
+tmp/
+temp/
+*.tmp
+*.cache
 
+# Logs & Outputs
+logs/
+tensorboard/
+wandb/
+mlruns/
+
+# ============================================
+# DATASET FILES (EXCLUDE - TOO LARGE)
+# ============================================
+
+# Raw dataset directories
+Dataset_1/
+Dataset_2/
+Dataset_3/
+data/
+datasets/
+raw_data/
+
+# Large image formats from datasets
+*.tif
+*.tiff
+
+# Compressed datasets
+*.zip
+*.tar
+*.tar.gz
+*.7z
+
+# ============================================
+# MODEL WEIGHTS (EXCLUDE - TOO LARGE)
+# ============================================
+
+# Pretrained weights directory
+pretrained_weights/
+checkpoints/
+*.pth
+*.pt
+*.pkl
+*.pickle
+weights/
+models/
+saved_models/
+
+# ============================================
+# KEEP THESE FILES (IMPORTANT!)
+# ============================================
+
+# Keep result visualizations (PNG images in results/)
+!results/**/*.png
+!docs/**/*.png
+!figures/**/*.png
+
+# Keep documentation PDFs
+!docs/**/*.pdf
+!*.pdf
+
+# Keep all Python scripts (*.py is NOT excluded, included by default)
+# Keep all shell scripts (*.sh is NOT excluded, included by default)
+
+# ============================================
+# ADDITIONAL EXCLUDES
+# ============================================
+
+# Training outputs (intermediate)
+train_outputs/
+eval_outputs/
+output/
+
+# Records/CSV with huge pose data (optional - uncomment if needed)
+# records/
+# poses/
+
+# If you want to exclude most records but keep examples:
+# records/*
+# !records/example_*.csv
+# !records/README.md
